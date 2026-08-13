@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "active-slam-rl"
+version = "0.1.0"
+description = "RL-driven active SLAM for confined underwater environments"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]

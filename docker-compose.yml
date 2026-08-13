@@ -1,0 +1,21 @@
+# Convenience wrapper around `docker build` / `docker run` so results/
+# persists on your host machine and you don't have to retype the volume
+# mount every time. See the "Docker" section of README.md for usage.
+#
+# Examples:
+#   docker compose run --rm active-slam-rl pytest tests/ -v
+#   docker compose run --rm active-slam-rl python scripts/run_training.py --config configs/quick_demo.yaml
+#   docker compose run --rm active-slam-rl python scripts/run_eval.py --config configs/quick_demo.yaml --model results/ppo_active_slam.zip
+#   docker compose run --rm active-slam-rl python scripts/visualize_demo.py --config configs/quick_demo.yaml --model results/ppo_active_slam.zip
+
+services:
+  active-slam-rl:
+    build: .
+    image: active-slam-rl:latest
+    volumes:
+      - ./results:/app/results
+      - ./native/fs2d:/app/native/fs2d   # so a native build persists back to the host too
+    working_dir: /app
+    # Overridden by `docker compose run active-slam-rl <command>`; this is
+    # just what happens on a bare `docker compose up`.
+    command: ["pytest", "tests/", "-v"]

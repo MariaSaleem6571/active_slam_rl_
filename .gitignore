@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Native build artifacts (checked-in source, not compiled binaries)
+native/fs2d/build/
+
+# Large training artifacts -- regenerate via scripts/, don't commit by default.
+# Comment these out if you want to version a specific trained model/run.
+results/train_logs/
+results/*.zip
+results/eval/*.png
+results/eval/*.gif
+results/*.png
+
+.DS_Store

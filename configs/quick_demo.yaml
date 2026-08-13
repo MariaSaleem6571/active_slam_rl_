@@ -1,0 +1,91 @@
+# Small, fast configuration used to produce the demo artifacts checked
+# into results/ (training_curves.png, the eval dashboards, and
+# rollout_demo.gif). Runs at ~20-25 fps on a single CPU core, so a few
+# thousand timesteps take a couple of minutes -- useful for smoke-testing
+# changes or iterating on reward shaping before committing to a full
+# `default.yaml`-scale run.
+#
+# IMPORTANT: patch_size and world/sonar dimensions define the observation
+# space, which is baked into any saved model's network shapes. A model
+# trained with this config can only be loaded/evaluated against this same
+# config (or another config with identical world/sonar/patch_size) --
+# don't point scripts/run_eval.py at a model trained here while passing
+# --config configs/default.yaml, and vice versa.
+
+world:
+  height: 90
+  width: 90
+  corridor_width_range: [6, 9]
+  branch_probability: 0.03
+  max_branches: 3
+  debris_density: 0.01
+  loop_probability: 0.6
+  n_steps: 350
+  step_len: 2
+  turn_std_deg: 18.0
+
+sonar:
+  fov_deg: 130.0
+  n_beams: 64
+  max_range: 18.0
+  range_noise_std: 0.25
+  multipath_ghost_prob: 0.03
+  frame_size: 48
+
+reward_weights:
+  w_cov: 400.0
+  w_cons: 2.0
+  w_safe: 4.0
+  w_loop: 5.0
+  w_change: 50.0
+  w_loiter: 0.15
+
+# IMU (gyro) + DVL sensing, and the SfM (State fusion Module) EKF that
+# fuses them with FS2D -- see docs/ARCHITECTURE.md section 9 and
+# src/active_slam_rl/fusion/sfm.py. Same defaults as default.yaml; listed
+# explicitly here too so this quick-demo config stays self-contained and
+# easy to perturb for smoke-testing fusion changes specifically. Toggle
+# env.use_sfm_fusion below to turn fusion off entirely (reproduces this
+# codebase's pre-SfM behavior).
+imu:
+  gyro_noise_std_deg: 1.0
+  gyro_bias_init_std_deg: 1.5
+  gyro_bias_walk_std_deg: 0.03
+
+dvl:
+  vel_noise_std: 0.04
+  dropout_prob_base: 0.01
+  dropout_prob_near_wall: 0.3
+  near_wall_range: 1.5
+
+sfm:
+  assumed_gyro_noise_std_deg: 1.0
+  assumed_dvl_noise_std: 0.04
+  dvl_dropout_disp_std: 5.0
+  bias_init_std_deg: 1.5
+  bias_process_noise_std_deg: 0.03
+  chi2_gate_threshold: 16.27
+
+env:
+  patch_size: 28
+  max_steps: 200
+  battery_capacity: 500.0
+  battery_cost_move: 1.0
+  battery_cost_dwell: 2.5
+  process_noise_xy: 0.05
+  process_noise_theta_deg: 1.0
+  change_threshold: 1.5
+  map_completeness_threshold: 0.6
+  force_numpy_fs2d: true
+  use_sfm_fusion: true
+
+training:
+  total_timesteps: 18000
+  n_envs: 1
+  latent_dim: 128
+  learning_rate: 0.0003
+  n_steps: 256
+  batch_size: 64
+  seed: 0
+  log_dir: results/train_logs
+  model_out: results/ppo_active_slam.zip

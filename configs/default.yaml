@@ -1,0 +1,77 @@
+# Default configuration for training and evaluation.
+# Loaded by active_slam_rl.utils.config.load_config().
+
+world:
+  height: 140
+  width: 140
+  corridor_width_range: [6, 10]
+  branch_probability: 0.03
+  max_branches: 3
+  debris_density: 0.01
+  loop_probability: 0.6
+  n_steps: 900
+  step_len: 2
+  turn_std_deg: 18.0
+
+sonar:
+  fov_deg: 130.0
+  n_beams: 96
+  max_range: 22.0
+  range_noise_std: 0.25
+  multipath_ghost_prob: 0.03
+  frame_size: 64
+
+reward_weights:
+  w_cov: 400.0
+  w_cons: 2.0
+  w_safe: 4.0
+  w_loop: 5.0
+  w_change: 50.0
+
+# IMU (gyro) + DVL sensing, and the SfM (State fusion Module) EKF that
+# fuses them with FS2D -- see docs/ARCHITECTURE.md section 9 and
+# src/active_slam_rl/fusion/sfm.py for the algorithm and the reasoning
+# behind every one of these defaults. Toggle env.use_sfm_fusion below to
+# turn fusion off entirely (reproduces this codebase's pre-SfM behavior).
+imu:
+  gyro_noise_std_deg: 1.0
+  gyro_bias_init_std_deg: 1.5
+  gyro_bias_walk_std_deg: 0.03
+
+dvl:
+  vel_noise_std: 0.04
+  dropout_prob_base: 0.01
+  dropout_prob_near_wall: 0.3
+  near_wall_range: 1.5
+
+sfm:
+  assumed_gyro_noise_std_deg: 1.0
+  assumed_dvl_noise_std: 0.04
+  dvl_dropout_disp_std: 5.0
+  bias_init_std_deg: 1.5
+  bias_process_noise_std_deg: 0.03
+  chi2_gate_threshold: 16.27
+
+env:
+  patch_size: 32
+  max_steps: 500
+  battery_capacity: 500.0
+  battery_cost_move: 1.0
+  battery_cost_dwell: 2.5
+  process_noise_xy: 0.05
+  process_noise_theta_deg: 1.0
+  change_threshold: 1.5
+  map_completeness_threshold: 0.6
+  force_numpy_fs2d: true
+  use_sfm_fusion: true
+
+training:
+  total_timesteps: 200000
+  n_envs: 4
+  latent_dim: 128
+  learning_rate: 0.0003
+  n_steps: 512
+  batch_size: 256
+  seed: 0
+  log_dir: results/train_logs
+  model_out: results/ppo_active_slam.zip
