@@ -22,6 +22,13 @@ class MetricsLoggingCallback(BaseCallback):
         "timestep", "episode", "env_idx", "episode_reward", "episode_length",
         "map_completeness", "final_ate", "mean_ate", "path_length",
         "collision_count", "map_entropy", "loop_closures_validated",
+        # Registration / fusion diagnostics -- see
+        # metrics/plotting.py's plot_registration_and_fusion_diagnostics
+        # and env/sonar_model.py's "MODALITY TAGGING" section for why
+        # imaging vs scanning are broken out separately rather than a
+        # single pooled q_t mean.
+        "mean_q_t_imaging", "mean_q_t_scanning",
+        "fs2d_rejected_outlier_rate", "used_fs2d_rate",
     ]
 
     def __init__(self, log_dir: str, verbose: int = 0,
@@ -48,6 +55,9 @@ class MetricsLoggingCallback(BaseCallback):
         self._episode_counts = {}
         self._ate_running = {}
         self._loop_closure_counts = {}
+        self._q_t_by_mode = {}      # env_idx -> {"imaging": [...], "scanning": [...]}
+        self._fs2d_rejected = {}    # env_idx -> [bool, ...]
+        self._fs2d_used = {}        # env_idx -> [bool, ...]
         os.makedirs(log_dir, exist_ok=True)
         with open(self.csv_path, "w", newline="") as f:
             csv.DictWriter(f, fieldnames=self.FIELDNAMES).writeheader()
@@ -67,10 +77,22 @@ class MetricsLoggingCallback(BaseCallback):
             if info.get("loop_closure_validated"):
                 self._loop_closure_counts[i] = self._loop_closure_counts.get(i, 0) + 1
 
+            frame_mode = info.get("frame_mode")
+            if frame_mode in ("imaging", "scanning"):
+                self._q_t_by_mode.setdefault(i, {"imaging": [], "scanning": []})
+                self._q_t_by_mode[i][frame_mode].append(info.get("q_t", 0.0))
+            sfm_info = info.get("sfm")
+            if sfm_info is not None:
+                self._fs2d_rejected.setdefault(i, []).append(bool(sfm_info["fs2d_rejected_outlier"]))
+                self._fs2d_used.setdefault(i, []).append(bool(sfm_info["used_fs2d"]))
+
             done = dones[i] if i < len(dones) else False
             if done and "episode" in info:  # Monitor injects this on episode end
                 self._episode_counts[i] = self._episode_counts.get(i, 0) + 1
                 ate_hist = self._ate_running.get(i, [0.0])
+                q_t_hist = self._q_t_by_mode.get(i, {"imaging": [], "scanning": []})
+                rejected_hist = self._fs2d_rejected.get(i, [])
+                used_hist = self._fs2d_used.get(i, [])
                 row = {
                     "timestep": self.num_timesteps,
                     "episode": self._episode_counts[i],
@@ -84,11 +106,22 @@ class MetricsLoggingCallback(BaseCallback):
                     "collision_count": info.get("collision_count", 0),
                     "map_entropy": info.get("map_entropy", 0.0),
                     "loop_closures_validated": self._loop_closure_counts.get(i, 0),
+                    "mean_q_t_imaging": (sum(q_t_hist["imaging"]) / len(q_t_hist["imaging"])
+                                         if q_t_hist["imaging"] else float("nan")),
+                    "mean_q_t_scanning": (sum(q_t_hist["scanning"]) / len(q_t_hist["scanning"])
+                                          if q_t_hist["scanning"] else float("nan")),
+                    "fs2d_rejected_outlier_rate": (sum(rejected_hist) / len(rejected_hist)
+                                                   if rejected_hist else float("nan")),
+                    "used_fs2d_rate": (sum(used_hist) / len(used_hist)
+                                       if used_hist else float("nan")),
                 }
                 with open(self.csv_path, "a", newline="") as f:
                     csv.DictWriter(f, fieldnames=self.FIELDNAMES).writerow(row)
                 self._ate_running[i] = []
                 self._loop_closure_counts[i] = 0
+                self._q_t_by_mode[i] = {"imaging": [], "scanning": []}
+                self._fs2d_rejected[i] = []
+                self._fs2d_used[i] = []
 
                 self._total_episodes_logged += 1
                 if self.live_plot and self._total_episodes_logged % self.plot_every_episodes == 0:
@@ -100,8 +133,9 @@ class MetricsLoggingCallback(BaseCallback):
         # matplotlib's import cost, and so a plotting failure (e.g. too few
         # rows for a rolling window edge case) can't crash training itself.
         try:
-            from active_slam_rl.metrics.plotting import plot_training_curves
+            from active_slam_rl.metrics.plotting import plot_training_curves, plot_training_diagnostics_curves
             plot_training_curves(self.csv_path, self.plot_out_dir)
+            plot_training_diagnostics_curves(self.csv_path, self.plot_out_dir)
         except Exception as e:
             if self.verbose:
                 print(f"[MetricsLoggingCallback] live plot refresh skipped: {e}")

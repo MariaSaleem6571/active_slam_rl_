@@ -40,6 +40,17 @@ class EpisodeMetrics:
     true_traj: List[tuple] = field(default_factory=list)
     est_traj: List[tuple] = field(default_factory=list)
 
+    # registration / sensor-fusion diagnostics, kept for plotting (see
+    # metrics/plotting.py's plot_registration_and_fusion_diagnostics).
+    # frame_mode_trace entries are "imaging"/"scanning"/None (None only
+    # for the very first step of the episode, before any registration has
+    # a previous frame to compare against).
+    q_t_trace: List[float] = field(default_factory=list)
+    frame_mode_trace: List[str] = field(default_factory=list)
+    bias_estimate_deg_trace: List[float] = field(default_factory=list)
+    fs2d_rejected_outlier_trace: List[bool] = field(default_factory=list)
+    used_fs2d_trace: List[bool] = field(default_factory=list)
+
 
 def relative_pose_error(true_traj: List[tuple], est_traj: List[tuple]) -> float:
     """RPE (m/frame): mean drift accumulated *per step* rather than total
@@ -91,6 +102,12 @@ def rollout_episode(env, policy, max_steps: int | None = None, deterministic: bo
         metrics.entropy_trace.append(info["map_entropy"])
         metrics.true_traj.append(info["true_pose"])
         metrics.est_traj.append(info["est_pose"])
+        metrics.q_t_trace.append(info["q_t"])
+        metrics.frame_mode_trace.append(info["frame_mode"])
+        if info["sfm"] is not None:
+            metrics.bias_estimate_deg_trace.append(info["sfm"]["bias_estimate_deg"])
+            metrics.fs2d_rejected_outlier_trace.append(info["sfm"]["fs2d_rejected_outlier"])
+            metrics.used_fs2d_trace.append(info["sfm"]["used_fs2d"])
         if info["collided"]:
             min_obs_dist = min(min_obs_dist, 0.0)
         metrics.loop_closures_validated += int(info["loop_closure_validated"])

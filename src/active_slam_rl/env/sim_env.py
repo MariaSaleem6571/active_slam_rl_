@@ -562,6 +562,14 @@ class ActiveSlamEnv(gym.Env):
             "trace_cov": self.trace_cov,
             "collided": self._last_collided,
             "loop_closure_validated": self._last_loop_closure,
+            # Which sonar modality produced this step's frame/registration
+            # -- see env/sonar_model.py's "MODALITY TAGGING" section and
+            # registration/fs2d.py's fold-ambiguity discussion for why
+            # imaging vs scanning registration reliability differs
+            # substantially. Lets metrics/plotting.py break q_t and other
+            # per-step diagnostics down by modality instead of only seeing
+            # an unexplained-looking mixed distribution.
+            "frame_mode": self._prev_frame_mode,
             "beta": reward_breakdown.beta if reward_breakdown is not None else self.cfg.reward_weights.beta_initial,
             "beta_decay_rate": self._decay_controller.decay_rate,
             "ate": self._current_ate(),
