@@ -14,5 +14,5 @@ results/*.zip
 results/eval/*.png
 results/eval/*.gif
 results/*.png
-
+docs/
 .DS_Store
