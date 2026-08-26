@@ -320,6 +320,53 @@ def plot_sonar_frame_comparison(env, out_dir: str, name: str = "sonar_frame_comp
     return out_path
 
 
+def plot_sfm2d_landmark_maps(env, out_dir: str, name: str = "sfm2d_landmark_maps") -> str:
+    """Both StructureFromMotion2D landmark maps (perception/sfm2d.py) --
+    imaging and scanning, kept fully separate -- plotted over the true
+    occupancy map, plus a size-vs-confidence (n_obs) view of each.
+
+    This is the landmark/structure map visualization that
+    plot_registration_and_fusion_diagnostics' docstring flagged as "moot
+    until SfM exists" -- it exists now. Requires `env.cfg.use_sfm2d=True`
+    for the maps to be non-empty (see EnvConfig's comment for why it
+    defaults to False: this is a genuinely new, separately-opt-in
+    feature, not a drop-in replacement for anything already in the
+    pipeline).
+
+    `env` should be an ActiveSlamEnv (or MarineGym/Stonefish subclass)
+    that has taken at least a few steps with use_sfm2d=True so its two
+    maps have something in them; doesn't mutate the environment.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    occ = env.world.occ
+
+    for ax, sfm_engine, color in [
+        (axes[0], env.sfm2d_imaging, "tab:orange"),
+        (axes[1], env.sfm2d_scanning, "tab:cyan"),
+    ]:
+        ax.imshow(occ, cmap="gray_r", origin="upper", alpha=0.35)
+        landmarks = sfm_engine.get_map()
+        if landmarks:
+            ys = [lm.position[0] for lm in landmarks]
+            xs = [lm.position[1] for lm in landmarks]
+            n_obs = np.array([lm.n_obs for lm in landmarks])
+            # point size/alpha scale with n_obs -- a landmark seen many
+            # times is a much more trustworthy piece of "structure" than
+            # one seen once, and this makes that visually obvious.
+            sizes = 8 + 4 * np.clip(n_obs, 0, 20)
+            alphas = np.clip(0.2 + 0.04 * n_obs, 0.2, 1.0)
+            ax.scatter(xs, ys, s=sizes, c=color, alpha=alphas, edgecolors="none")
+        ax.set_title(f"{sfm_engine.modality} SfM2D landmark map\n"
+                     f"({len(landmarks)} landmarks)")
+        ax.axis("off")
+
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, f"{name}.png")
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return out_path
+
+
 def plot_baseline_comparison(summaries: dict, out_dir: str) -> str:
     """Bar-chart comparison of RL policy vs. Frontier / NBV / Random Walk
     baselines across the thesis's headline metrics (section 8.5)."""

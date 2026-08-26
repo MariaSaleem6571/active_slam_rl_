@@ -47,6 +47,7 @@ from active_slam_rl.env.reward import compute_reward, compute_beta, AdaptiveDeca
 from active_slam_rl.mapping.volumetric_map import OccupancyGrid
 from active_slam_rl.mapping.change_detection import compute_change_mask, compute_innovation
 from active_slam_rl.perception.loop_closure import LoopClosureDetector
+from active_slam_rl.perception.sfm2d import StructureFromMotion2D, SfM2DConfig
 from active_slam_rl.registration.fs2d import FS2DRegistration
 from active_slam_rl.fusion.sfm import StateFusionModule, SfMConfig
 
@@ -59,6 +60,13 @@ class EnvConfig:
     imu: IMUConfig = field(default_factory=IMUConfig)
     dvl: DVLConfig = field(default_factory=DVLConfig)
     sfm: SfMConfig = field(default_factory=SfMConfig)
+    # NOTE: `sfm` above is fusion/sfm.py's StateFusionModule config (an EKF
+    # -- "SfM" there is a pre-existing backronym, not Structure from
+    # Motion; see perception/sfm2d.py's docstring). `sfm2d` below is the
+    # actual Structure-from-Motion: a landmark map + pose-correction
+    # estimator, kept as two fully independent instances (one per sonar
+    # modality) -- see StructureFromMotion2D/SfM2DConfig docs.
+    sfm2d: SfM2DConfig = field(default_factory=SfM2DConfig)
     patch_size: int = 32
     max_steps: int = 500
     battery_capacity: float = 500.0     # abstract energy units
@@ -76,6 +84,22 @@ class EnvConfig:
     # useful ablation switch, and an escape hatch if you need to compare
     # against results generated before this feature existed.
     use_sfm_fusion: bool = True
+    # Structure-from-Motion (perception/sfm2d.py) is entirely separate
+    # from the above and off by default, so existing configs/results are
+    # unaffected unless explicitly opted in. `use_sfm2d=True` builds both
+    # per-modality landmark maps (self.sfm2d_imaging / self.sfm2d_scanning)
+    # regardless of `sfm2d_apply_correction_from`, purely so both maps are
+    # available for inspection/plotting (see
+    # metrics/plotting.py::plot_sfm2d_landmark_maps) even when you only
+    # want one modality's corrections actually affecting est_pose.
+    # `sfm2d_apply_correction_from` picks which modality's pose-correction
+    # output is allowed to nudge est_pose: "imaging", "scanning", "both",
+    # or "off" (build the maps, use neither for correction -- e.g. to
+    # inspect map quality in isolation without it affecting the
+    # trajectory the policy sees).
+    use_sfm2d: bool = False
+    sfm2d_apply_correction_from: str = "both"
+    sfm2d_correction_gain: float = 0.5   # how strongly (0-1) to apply a computed correction, mirrors loop closure's `pull`
     seed: Optional[int] = None
 
 
@@ -112,6 +136,12 @@ class ActiveSlamEnv(gym.Env):
         # `self.sonar` already is, so they always bind the *current*
         # `self.rng`.
         self.sfm = StateFusionModule(config.sfm)
+        # Neither draws any randomness of its own (pure geometry -- see
+        # perception/sfm2d.py), so, like self.sfm above, safe to create
+        # once here and just clear their landmark maps every episode (see
+        # _reset_internal_state) rather than rebuild against self.rng.
+        self.sfm2d_imaging = StructureFromMotion2D("imaging", config.sfm2d)
+        self.sfm2d_scanning = StructureFromMotion2D("scanning", config.sfm2d)
         self._episode_count = 0
         self._reset_internal_state()
 
@@ -200,6 +230,31 @@ class ActiveSlamEnv(gym.Env):
             fusion = None
             est_y, est_x, est_theta = self._integrate_odometry(reg)
         self._last_fusion = fusion
+
+        # --- Structure-from-Motion (perception/sfm2d.py) -- landmark map
+        # + pose correction, entirely separate from the EKF fusion above
+        # (see EnvConfig.sfm2d's comment / perception/sfm2d.py's docstring
+        # for why "sfm" and "sfm2d" are two different things in this
+        # codebase). Both per-modality maps are always built when
+        # use_sfm2d=True regardless of sfm2d_apply_correction_from, purely
+        # so both are available for inspection/plotting even when only one
+        # modality's corrections are allowed to affect est_pose. Uses
+        # est_pose (this step's already-fused estimate), never true_pose --
+        # see StructureFromMotion2D.process_frame's docstring for why using
+        # true_pose here would defeat the entire point.
+        sfm2d_result = None
+        if self.cfg.use_sfm2d:
+            sfm2d_engine = self.sfm2d_imaging if frame_mode == "imaging" else self.sfm2d_scanning
+            sfm2d_result = sfm2d_engine.process_frame(
+                ranges, angles, (est_y, est_x, est_theta), self.t, max_range=self.cfg.sonar.max_range)
+            allow_correction = self.cfg.sfm2d_apply_correction_from in (frame_mode, "both")
+            if allow_correction and sfm2d_result.pose_correction is not None:
+                gain = self.cfg.sfm2d_correction_gain
+                dy_c, dx_c, dtheta_c = sfm2d_result.pose_correction
+                est_y += gain * dy_c
+                est_x += gain * dx_c
+                est_theta += gain * dtheta_c
+        self._last_sfm2d = sfm2d_result
 
         # --- Map update (Bayesian, in the estimated frame) ---
         self.map.snapshot_for_change_detection()
@@ -349,6 +404,9 @@ class ActiveSlamEnv(gym.Env):
             self.imu_model = None
             self.dvl_model = None
         self.sfm.reset()   # no rng draw of its own; fresh bias *belief* either way
+        self.sfm2d_imaging.reset()
+        self.sfm2d_scanning.reset()
+        self._last_sfm2d = None
 
         self.true_pose = self.world.start_pose
         self.est_pose = self.world.start_pose
@@ -593,6 +651,23 @@ class ActiveSlamEnv(gym.Env):
                 "bias_estimate_deg": self._last_fusion.bias_estimate_deg,
                 "bias_std_deg": self._last_fusion.bias_std_deg,
                 "covariance_trace": float(np.trace(self._last_fusion.covariance)),
+            },
+            # perception/sfm2d.py's StructureFromMotion2D -- the actual
+            # Structure-from-Motion, entirely separate from "sfm" above
+            # (see that module's docstring). None when cfg.use_sfm2d=False
+            # or right after reset(). n_landmarks_* report both maps'
+            # sizes regardless of which modality produced this step's
+            # frame, since both maps persist and are worth watching
+            # together; the rest (pose_correction/n_matched/etc.) is
+            # specific to *this step's* active modality.
+            "sfm2d": None if not self.cfg.use_sfm2d else {
+                "active_modality": self._prev_frame_mode,
+                "n_landmarks_imaging": len(self.sfm2d_imaging.get_map()),
+                "n_landmarks_scanning": len(self.sfm2d_scanning.get_map()),
+                "pose_correction": None if self._last_sfm2d is None else self._last_sfm2d.pose_correction,
+                "n_matched": None if self._last_sfm2d is None else self._last_sfm2d.n_matched,
+                "n_new_landmarks": None if self._last_sfm2d is None else self._last_sfm2d.n_new_landmarks,
+                "residual_rms": None if self._last_sfm2d is None else self._last_sfm2d.residual_rms,
             },
         }
         if reward_breakdown is not None:
