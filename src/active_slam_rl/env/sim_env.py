@@ -92,7 +92,7 @@ class ActiveSlamEnv(gym.Env):
         ps = config.patch_size
         self.observation_space = spaces.Dict({
             "patch": spaces.Box(low=0.0, high=1.0, shape=(3, ps, ps), dtype=np.float32),
-            "scalars": spaces.Box(low=-10.0, high=10.0, shape=(5,), dtype=np.float32),
+            "scalars": spaces.Box(low=-10.0, high=10.0, shape=(6,), dtype=np.float32),
         })
 
         self.fs2d = FS2DRegistration(force_numpy=config.force_numpy_fs2d)
@@ -527,12 +527,24 @@ class ActiveSlamEnv(gym.Env):
 
         battery_frac = float(np.clip(self.battery / self.cfg.battery_capacity, 0.0, 1.0))
         time_frac = float(np.clip(1.0 - self.t / self.cfg.max_steps, 0.0, 1.0))
+        # frame_mode_flag: 0.0 = last sonar frame was imaging (narrow FOV,
+        # cheap), 1.0 = scanning/360-deg (dense, costs a dwell). Without
+        # this the policy has no way to distinguish "q_t is low because the
+        # registration itself is uncertain" from "q_t is low because the
+        # cheap imaging modality structurally can't do much better" -- see
+        # registration/fs2d.py's fold-ambiguity discussion and
+        # env/sonar_model.py's "MODALITY TAGGING" section for why the two
+        # modalities' registration reliability differs substantially.
+        # This also gives the policy the context it needs to learn when
+        # dwelling for a scanning-sonar frame is worth the battery cost.
+        frame_mode_flag = 1.0 if self._prev_frame_mode == "scanning" else 0.0
         scalars = np.array([
             self._q_t,
             self._ell_t,
             float(np.clip(self.trace_cov, 0.0, 10.0)),
             battery_frac,
             time_frac,
+            frame_mode_flag,
         ], dtype=np.float32)
         return {"patch": patch, "scalars": scalars}
 
