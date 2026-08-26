@@ -12,6 +12,7 @@ from active_slam_rl.env.imu_dvl_model import IMUConfig, DVLConfig
 from active_slam_rl.env.reward import RewardWeights
 from active_slam_rl.env.sim_env import EnvConfig
 from active_slam_rl.fusion.sfm import SfMConfig
+from active_slam_rl.perception.sfm2d import SfM2DConfig
 
 
 def load_config(path: str):
@@ -29,10 +30,18 @@ def load_config(path: str):
     imu_cfg = IMUConfig(**{**IMUConfig().__dict__, **raw.get("imu", {})})
     dvl_cfg = DVLConfig(**{**DVLConfig().__dict__, **raw.get("dvl", {})})
     sfm_cfg = SfMConfig(**{**SfMConfig().__dict__, **raw.get("sfm", {})})
+    # perception/sfm2d.py's StructureFromMotion2D -- the actual
+    # Structure-from-Motion, NOT the same thing as "sfm" above (see that
+    # module's docstring for the naming disambiguation). Also optional;
+    # falls back to SfM2DConfig()'s defaults. Whether it's used at all is
+    # governed separately by EnvConfig.use_sfm2d (an `env:` section key,
+    # picked up by the generic passthrough below) -- this section only
+    # tunes its internals (match_gate_m etc.) for when it *is* enabled.
+    sfm2d_cfg = SfM2DConfig(**{**SfM2DConfig().__dict__, **raw.get("sfm2d", {})})
     env_raw = raw.get("env", {})
     env_cfg = EnvConfig(
         world=world_cfg, sonar=sonar_cfg, reward_weights=reward_cfg,
-        imu=imu_cfg, dvl=dvl_cfg, sfm=sfm_cfg,
+        imu=imu_cfg, dvl=dvl_cfg, sfm=sfm_cfg, sfm2d=sfm2d_cfg,
         **{k: v for k, v in env_raw.items()},
     )
     training_cfg = raw.get("training", {})

@@ -52,6 +52,22 @@ sfm:
   bias_process_noise_std_deg: 0.03
   chi2_gate_threshold: 16.27
 
+# perception/sfm2d.py's StructureFromMotion2D -- the actual
+# Structure-from-Motion (landmark map + pose correction), NOT the same
+# thing as "sfm" above despite the similar name (see sfm2d.py's
+# docstring). Tunes the module's internals; whether it's used at all is
+# controlled by env.use_sfm2d below (off by default). Defaults here match
+# SfM2DConfig()'s Python defaults, listed explicitly so they're easy to
+# find and perturb without reading the source.
+sfm2d:
+  match_gate_m: 0.6
+  min_matched_for_correction: 6
+  max_landmarks: 4000
+  range_noise_std: 0.25            # keep in sync with sonar.range_noise_std above
+  bearing_noise_std_deg: 2.0
+  max_correction_translation_m: 1.0
+  max_correction_rotation_deg: 15.0
+
 env:
   patch_size: 32
   max_steps: 500
@@ -64,6 +80,17 @@ env:
   map_completeness_threshold: 0.6
   force_numpy_fs2d: true
   use_sfm_fusion: true
+  # Off by default -- see EnvConfig's docstring and perception/sfm2d.py.
+  # Empirically net-positive on average but not a strict per-episode
+  # improvement (measured ~50-60% of episodes reduce final ATE, the rest
+  # can regress by a comparable margin -- see the module's docstring for
+  # why). Set true to opt in; "off" below keeps both landmark maps built
+  # for inspection/plotting without ever letting a correction touch
+  # est_pose, a safe way to look at map quality before trusting it with
+  # the trajectory the policy sees.
+  use_sfm2d: false
+  sfm2d_apply_correction_from: "both"   # "imaging" | "scanning" | "both" | "off"
+  sfm2d_correction_gain: 0.5
 
 training:
   total_timesteps: 200000
