@@ -84,25 +84,66 @@ class SonarModel:
         for use by FS2D and the state encoder. Intensity falls off with
         range and gets a speckle multiplicative noise term, mimicking real
         sonar imagery statistics.
+
+        Adjacent beams (angularly consecutive entries in `angles`) whose
+        image-space hit points land close together are additionally
+        connected by a short interpolated line. Without this, each beam
+        contributes only an isolated ~3x3 blob, so a `n_beams`-beam frame
+        (96 for imaging) covers well under 3% of the frame's pixels --
+        close to an unstructured sparse point pattern rather than the
+        continuous wall surface a real coherent-imaging sonar actually
+        returns. That sparsity, not the Fourier-Mellin math itself, turned
+        out to be the dominant cause of `registration/fs2d.py`'s
+        rotation/fold-ambiguity accuracy gap documented in
+        `docs/ARCHITECTURE.md` section 3: a sparse point cloud's Fourier
+        magnitude spectrum carries little genuine rotational structure to
+        correlate against, so both fold candidates end up looking about
+        equally (un)plausible. Connecting angularly-adjacent hits turns
+        each frame into the continuous silhouette Fourier-Mellin actually
+        needs. A gap threshold (`max_connect_gap_px`) deliberately skips
+        connecting across a big image-space jump -- e.g. one beam hitting a
+        near wall and its angular neighbor grazing past a doorway to a much
+        farther wall -- since that's two genuinely different surfaces, not
+        one continuous one, and bridging it would fabricate a diagonal
+        streak that isn't in the world.
         """
         cfg = self.cfg
         size = cfg.frame_size
         frame = np.zeros((size, size), dtype=np.float64)
         center = size / 2.0
         scale = (size / 2.0 - 1) / cfg.max_range
+        max_connect_gap_px = 4.0
+
+        prev_px_py = None
+        prev_intensity = None
         for r, a in zip(ranges, angles):
             # sonar convention: forward = +x (right in the egocentric image), a measured from heading
             px = center + r * scale * np.cos(a)
             py = center + r * scale * np.sin(a)
             xi, yi = int(round(px)), int(round(py))
+            cur_px_py, cur_intensity = None, None
             if 0 <= yi < size and 0 <= xi < size:
                 intensity = max(0.05, 1.0 - r / cfg.max_range)
                 speckle = self.rng.gamma(shape=4.0, scale=1.0 / 4.0)  # mean-1 speckle
-                frame[yi, xi] = min(1.0, intensity * speckle)
+                val = min(1.0, intensity * speckle)
+                frame[yi, xi] = max(frame[yi, xi], val)
                 # small blob so the image isn't a single-pixel dot -> more realistic + easier for FFT registration
                 if 0 < yi < size - 1 and 0 < xi < size - 1:
                     frame[yi - 1:yi + 2, xi - 1:xi + 2] = np.maximum(
-                        frame[yi - 1:yi + 2, xi - 1:xi + 2], frame[yi, xi] * 0.5)
+                        frame[yi - 1:yi + 2, xi - 1:xi + 2], val * 0.5)
+                cur_px_py, cur_intensity = (px, py), val
+
+                if prev_px_py is not None:
+                    gap = np.hypot(px - prev_px_py[0], py - prev_px_py[1])
+                    if gap <= max_connect_gap_px:
+                        n_steps = max(1, int(np.ceil(gap)))
+                        for t in np.linspace(0.0, 1.0, n_steps + 1)[1:-1]:
+                            ix = int(round(prev_px_py[0] + t * (px - prev_px_py[0])))
+                            iy = int(round(prev_px_py[1] + t * (py - prev_px_py[1])))
+                            if 0 <= iy < size and 0 <= ix < size:
+                                interp_val = prev_intensity + t * (val - prev_intensity)
+                                frame[iy, ix] = max(frame[iy, ix], interp_val)
+            prev_px_py, prev_intensity = cur_px_py, cur_intensity
         return frame
 
     def sense_imaging(self, y, x, theta):
