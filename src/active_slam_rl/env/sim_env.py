@@ -140,16 +140,32 @@ class ActiveSlamEnv(gym.Env):
         if dwell:
             ranges, angles, hits, frame = self.sonar.sense_scanning_360(y, x, theta)
             self.battery -= self.cfg.battery_cost_dwell
+            frame_mode = "scanning"
         else:
             ranges, angles, hits, frame = self.sonar.sense_imaging(y, x, theta)
             self.battery -= self.cfg.battery_cost_move
+            frame_mode = "imaging"
 
         # --- FS2D registration against previous ego frame -> odometry ---
-        if self._prev_frame is not None:
+        # Only register two frames captured by the *same* sonar modality.
+        # sense_imaging (narrow ~130 deg FOV) and sense_scanning_360 (full
+        # 360 deg sweep) produce frames with fundamentally different
+        # coverage/beam-density, so a phase-correlation match across that
+        # boundary isn't a meaningful motion estimate even though both
+        # frames happen to share the same (frame_size, frame_size) shape
+        # FS2D expects. On a modality switch we treat this step exactly
+        # like the very first step of an episode (reg=None): the fusion
+        # module already handles that by falling back to IMU/DVL dead
+        # reckoning alone (see fusion/sfm.py), and _integrate_odometry
+        # does the equivalent when fusion is off. We still update
+        # _prev_frame/_prev_frame_mode below so *next* step can register
+        # normally once two same-modality frames are available again.
+        if self._prev_frame is not None and self._prev_frame_mode == frame_mode:
             reg = self.fs2d.register(self._prev_frame, frame)
         else:
             reg = None
         self._prev_frame = frame
+        self._prev_frame_mode = frame_mode
 
         # --- IMU/DVL sensing + SfM fusion (feedback loop B / "Map -> SfM";
         # see docs/ARCHITECTURE.md section 9 and fusion/sfm.py) ---
@@ -208,8 +224,9 @@ class ActiveSlamEnv(gym.Env):
         beta_weights = replace(self.cfg.reward_weights, beta_decay_rate=self._decay_controller.decay_rate)
         beta = compute_beta(steps_since_last_closure, local_unknown_fraction, beta_weights)
 
-        self.loop_detector.maybe_add_keyframe((est_y, est_x, est_theta), frame, self.t)
-        ell_t, candidate = self.loop_detector.query(frame, self.t)
+        self.loop_detector.maybe_add_keyframe((est_y, est_x, est_theta), frame, self.t,
+                                               mode=frame_mode)
+        ell_t, candidate = self.loop_detector.query(frame, self.t, mode=frame_mode)
         loop_closure_validated = False
         info_gain = 0.0
         if candidate is not None:
@@ -339,6 +356,7 @@ class ActiveSlamEnv(gym.Env):
         self.battery = cfg.battery_capacity
         self.trace_cov = 0.1
         self._prev_frame = None
+        self._prev_frame_mode = None
         self._prev_entropy = self.map.entropy_normalized()
         self._q_t = 0.0
         self._ell_t = 0.0

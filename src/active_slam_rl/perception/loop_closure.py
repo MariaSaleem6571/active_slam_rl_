@@ -23,6 +23,20 @@ descriptor:
 Swap-in point: replace `SonarDescriptor.compute` with a learned embedding
 (e.g. a small CNN / NetVLAD-style head) without touching anything else —
 `LoopClosureDetector` only depends on descriptors supporting a distance.
+
+MODALITY TAGGING
+-----------------
+`ActiveSlamEnv` has two mutually-exclusive sonar modalities per step
+(`SonarModel.sense_imaging` -- narrow FOV, or `sense_scanning_360` -- a
+full 360-degree sweep; see `env/sonar_model.py`). Their egocentric frames
+differ enough in coverage and beam density that a descriptor/FS2D match
+between them isn't meaningful -- a 360-degree sweep frame simply doesn't
+correspond pixel-for-pixel to a ~130-degree forward cone. Every keyframe
+therefore records the sonar `mode` ("imaging"/"scanning") it was captured
+with, and `query()` only compares the current frame's descriptor against
+keyframes captured in the *same* mode, so any candidate handed back for
+FS2D re-registration (`ActiveSlamEnv.step`) is guaranteed to be a
+same-modality pair.
 """
 
 from __future__ import annotations
@@ -39,6 +53,8 @@ class Keyframe:
     descriptor: np.ndarray
     scan: np.ndarray
     timestep: int
+    mode: str = "imaging"   # "imaging" or "scanning" -- which sonar modality
+                             # captured `scan`; see module docstring
 
 
 @dataclass
@@ -82,30 +98,48 @@ class LoopClosureDetector:
         self.similarity_threshold = similarity_threshold
         self.min_pose_distance = min_pose_distance  # avoid matching the immediate past
 
-    def maybe_add_keyframe(self, pose, scan, timestep):
+    def maybe_add_keyframe(self, pose, scan, timestep, mode: str = "imaging"):
         """Add a keyframe if we've moved far enough from the last one
-        (keeps the database compact and avoids trivial self-matches)."""
+        (keeps the database compact and avoids trivial self-matches).
+
+        `mode` records which sonar modality captured `scan` ("imaging" or
+        "scanning") -- see module docstring's "MODALITY TAGGING" section.
+        Deliberately compared against the last keyframe *of any* mode for
+        the distance gate (it's still the same vehicle trajectory), but
+        stored per-keyframe so `query()` can restrict matching to the same
+        modality.
+        """
         if not self.keyframes:
-            self._add(pose, scan, timestep)
+            self._add(pose, scan, timestep, mode)
             return
         last = self.keyframes[-1]
         d = np.hypot(pose[0] - last.pose[0], pose[1] - last.pose[1])
         if d > self.min_pose_distance:
-            self._add(pose, scan, timestep)
+            self._add(pose, scan, timestep, mode)
 
-    def _add(self, pose, scan, timestep):
+    def _add(self, pose, scan, timestep, mode: str = "imaging"):
         desc = self.descriptor_fn.compute(scan)
-        self.keyframes.append(Keyframe(pose=pose, descriptor=desc, scan=scan, timestep=timestep))
+        self.keyframes.append(Keyframe(pose=pose, descriptor=desc, scan=scan,
+                                        timestep=timestep, mode=mode))
 
-    def query(self, scan: np.ndarray, current_timestep: int, exclude_recent: int = 20
-              ) -> Tuple[float, Optional[LoopClosureCandidate]]:
-        """Returns (ell_t, best_candidate_or_None)."""
+    def query(self, scan: np.ndarray, current_timestep: int, exclude_recent: int = 20,
+              mode: str = "imaging") -> Tuple[float, Optional[LoopClosureCandidate]]:
+        """Returns (ell_t, best_candidate_or_None).
+
+        Only keyframes captured in the same sonar `mode` as the current
+        frame are considered -- an imaging-sonar frame and a scanning-sonar
+        frame don't cover comparable geometry, so neither the descriptor
+        similarity nor a downstream FS2D re-registration against a
+        cross-modality keyframe would be meaningful (see module docstring).
+        """
         if not self.keyframes:
             return 0.0, None
         desc = self.descriptor_fn.compute(scan)
         best_sim, best_idx = -1.0, -1
         for i, kf in enumerate(self.keyframes):
             if current_timestep - kf.timestep < exclude_recent:
+                continue
+            if kf.mode != mode:
                 continue
             sim = float(np.dot(desc, kf.descriptor))  # cosine similarity, descriptors are unit-norm
             if sim > best_sim:

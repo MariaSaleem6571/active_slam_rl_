@@ -33,7 +33,9 @@ import numpy as np
 
 @dataclass
 class SonarConfig:
-    fov_deg: float = 130.0          # imaging sonar FOV (Ping/ARIS-style ~130 deg)
+    fov_deg: float = 130.0          # imaging sonar FOV (ARIS/Oculus-style ~130 deg;
+                                     # NOT the Ping360, which is the narrow-beam
+                                     # 360-degree scanning modality below)
     n_beams: int = 96
     max_range: float = 22.0         # world units (cells)
     range_noise_std: float = 0.25

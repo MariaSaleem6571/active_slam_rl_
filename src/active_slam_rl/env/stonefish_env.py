@@ -309,6 +309,7 @@ class StonefishActiveSlamEnv(ActiveSlamEnv):
         self.battery = cfg.battery_capacity
         self.trace_cov = 0.1
         self._prev_frame = None
+        self._prev_frame_mode = None
         self._prev_entropy = self.map.entropy_normalized()
         self._q_t = 0.0
         self._ell_t = 0.0
