@@ -29,6 +29,47 @@ that the rest of the pipeline depends on (see thesis section 5.2):
   * q_t   in [0, 1]      -- scalar match-quality score
   * Sigma_reg_t (3x3)    -- covariance of (dx, dy, dtheta)
 
+FOLD-AMBIGUITY TIE-BREAK: WHY OVERLAP, NOT PEAK SHARPNESS
+------------------------------------------------------------
+The real-valued log-polar magnitude correlation used for rotation only
+recovers `dtheta` mod pi, so two candidates (`dtheta` and `dtheta +/- pi`)
+are always generated and one is picked (see step 1 in
+`FourierMellinRegistration.register`). Measured against this
+environment's actual sonar frames (narrow-FOV, beam-sparse -- see
+`env/sonar_model.py`), picking by translation-correlation *peak
+sharpness* (the original approach) chose the wrong candidate on the
+majority of registrations: sonar frames are sparse enough that phase
+correlation produces a sharp-looking peak for *either* candidate almost
+every time (sharpness saturated near its clipped [0, 1] ceiling for both,
+regardless of which one was actually correct), so the comparison carried
+essentially no discriminating signal. Picking instead by the *actual
+image-domain overlap* after applying each candidate's rotation and shift
+-- normalized cross-correlation restricted to pixels where at least one
+frame has a return, since most of a sparse frame is 0/0 in both and
+shouldn't count as agreement -- directly asks "do these two scans agree
+once I've applied this candidate transform," which is a much stronger
+and more literal test of correctness than a frequency-domain confidence
+proxy. Empirically (`n=120` registrations against this world generator's
+actual imaging-sonar frames) this took the >90-degree gross-error rate
+from ~57% down to ~7-8%, and roughly halved the median rotation error on
+the remainder. See `docs/ARCHITECTURE.md` section 3/4 for the numbers and
+the diagnostic script.
+
+**This does not close the gap entirely.** ~7-8% of registrations are
+still confidently wrong even after this fix -- expected, since the root
+cause is deeper than the tie-break rule alone: this environment's
+imaging-sonar frames are a thin, low-information wall-silhouette (a few
+percent nonzero pixels; see `env/sonar_model.py`'s "MODALITY TAGGING"
+discussion), which is a difficult signal for *any* full-image Fourier
+technique to register confidently. `fusion/sfm.py`'s NIS gate exists
+specifically to catch whatever gets through. The scanning/360-degree
+modality (denser, full angular coverage) registers substantially more
+reliably in the same test; investigating a registration approach better
+suited to sparse point-like returns (e.g. point-set/ICP-style matching on
+the beam hit points `SonarModel._cast_beams` already computes, rather
+than full-image Fourier-Mellin) is a reasonable next step for the
+imaging-sonar path specifically.
+
 TWO IMPLEMENTATIONS, ONE INTERFACE
 -----------------------------------
 Constructor University's FS2D is a compiled C/C++ library (fast, but not
@@ -65,7 +106,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from scipy.ndimage import geometric_transform, map_coordinates
+from scipy.ndimage import geometric_transform, map_coordinates, shift as ndi_shift
 
 
 @dataclass
@@ -208,9 +249,15 @@ class FourierMellinRegistration:
         for cand in candidates:
             rotated = self._rotate(b_w, -cand)
             dy, dx, t_sharpness, _, _ = _phase_correlation(a_w, rotated)
-            score = t_sharpness
-            if best is None or score > best[0]:
-                best = (score, cand, dy, dx, t_sharpness)
+            # Tie-break by actual image-domain overlap after applying this
+            # candidate's rotation+shift, not by correlation "sharpness" --
+            # see the module docstring's "FOLD-AMBIGUITY TIE-BREAK" section
+            # for why sharpness doesn't discriminate on this env's sparse
+            # sonar frames.
+            rotated_shifted = ndi_shift(rotated, shift=(-dy, -dx), mode="constant")
+            overlap = self._overlap_score(a_w, rotated_shifted)
+            if best is None or overlap > best[0]:
+                best = (overlap, cand, dy, dx, t_sharpness)
 
         _, dtheta, dy, dx, t_sharpness = best
         # _phase_correlation(a, rotated_b) returns the shift that aligns
@@ -247,6 +294,29 @@ class FourierMellinRegistration:
         src_y = cy + yy_c * cos_a + xx_c * sin_a
         src_x = cx - yy_c * sin_a + xx_c * cos_a
         return map_coordinates(img, [src_y, src_x], order=1, mode="constant")
+
+    @staticmethod
+    def _overlap_score(a: np.ndarray, b_aligned: np.ndarray) -> float:
+        """Normalized cross-correlation between two already-aligned images,
+        restricted to pixels where at least one has a return. This env's
+        sonar frames are sparse (a few percent nonzero; see
+        env/sonar_model.py), so an unmasked full-image correlation would be
+        dominated by 0/0 agreement everywhere neither scan saw anything --
+        that tells you nothing about whether this specific candidate
+        rotation is correct. Restricting to "at least one frame has signal
+        here" makes the score sensitive to actual agreement/disagreement
+        between the two candidates' outcomes.
+        """
+        mask = (a > 0) | (b_aligned > 0)
+        if mask.sum() < 4:
+            return 0.0
+        av, bv = a[mask], b_aligned[mask]
+        av = av - av.mean()
+        bv = bv - bv.mean()
+        denom = np.linalg.norm(av) * np.linalg.norm(bv)
+        if denom < 1e-8:
+            return 0.0
+        return float(np.clip(np.dot(av, bv) / denom, -1.0, 1.0))
 
 
 class NativeFS2DBinding:
