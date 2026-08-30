@@ -333,7 +333,7 @@ def plot_sfm2d_landmark_maps(env, out_dir: str, name: str = "sfm2d_landmark_maps
     feature, not a drop-in replacement for anything already in the
     pipeline).
 
-    `env` should be an ActiveSlamEnv (or MarineGym/Stonefish subclass)
+    `env` should be an ActiveSlamEnv
     that has taken at least a few steps with use_sfm2d=True so its two
     maps have something in them; doesn't mutate the environment.
     """

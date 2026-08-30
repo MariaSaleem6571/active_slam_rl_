@@ -7,10 +7,9 @@ Usage:
 
 This script is intentionally simulator-agnostic: it builds a
 `gymnasium.Env` from `active_slam_rl.env.sim_env.ActiveSlamEnv` (the
-lightweight environment that runs anywhere, right now) but the exact same
-PPO/SB3 code works unmodified against `active_slam_rl.env.marinegym_env`
-once MarineGym/Isaac Sim is available -- see that file's docstring for the
-one-line swap.
+lightweight environment that runs anywhere, right now). The same PPO/SB3
+code would work unmodified against any other `gymnasium.Env`-compatible
+backend, should one be added later.
 """
 
 from __future__ import annotations

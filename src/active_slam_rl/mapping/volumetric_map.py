@@ -12,9 +12,9 @@ full 3D TSDF, because:
 
 `OccupancyGrid` below is written so that swapping in a 3D array (shape
 (D, H, W) instead of (H, W)) requires no change to the update logic itself
-— every operation is elementwise / numpy-broadcastable. See
-`docs/ARCHITECTURE.md` for the note on extending this to real TSDF/Octomap/
-Voxblox output when integrating with MarineGym's actual sonar data.
+— every operation is elementwise / numpy-broadcastable, which matters if
+this is ever extended to a real TSDF/Octomap/Voxblox-style 3D map fed by
+a higher-fidelity simulator's actual sonar data.
 
 Bayesian update (log-odds form, for numerical stability):
     l_t(v) = l_{t-1}(v) + inverse_sensor_model(z_t | v, x_t)

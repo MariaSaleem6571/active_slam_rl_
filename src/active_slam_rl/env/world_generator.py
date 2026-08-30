@@ -11,10 +11,11 @@ via a randomized corridor "digger" that:
     loop-closure opportunity exists (Stage 3 also wants "long corridors
     with no loop closures" — set `loop_probability=0.0` for that case).
 
-This 2D plan-view stands in for the full 3D tunnel/wreck geometry Isaac-Sim
--based simulators like MarineGym render; see env/marinegym_env.py for how
-the same downstream RL/env interface would attach to that 3D simulator
-instead once available.
+This 2D plan-view stands in for the full 3D tunnel/wreck geometry a
+higher-fidelity 3D simulator would render, should this project attach to
+one later; the downstream RL/env interface (ActiveSlamEnv) is designed
+so that swap only requires a new sensing/world adapter, not changes to
+the policy, reward, or training code.
 """
 
 from __future__ import annotations

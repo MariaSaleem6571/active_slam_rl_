@@ -208,9 +208,9 @@ class ActiveSlamEnv(gym.Env):
         if self.cfg.use_sfm_fusion:
             # `true_relative_motion` reads this step's *true* motion purely
             # from true_pose -- it doesn't know or care which simulator
-            # backend is in use, so this fusion step works unmodified for
-            # the MarineGym/Stonefish/HoloOcean adapters too, exactly like
-            # FS2D registration and everything downstream of it already did.
+            # backend is in use, so this fusion step would work unmodified
+            # against a different world/sensing backend too, exactly like
+            # FS2D registration and everything downstream of it already does.
             true_dtheta, true_disp_body = true_relative_motion(prev_true, self.true_pose)
             imu_dtheta = self.imu_model.sense(true_dtheta)
             min_range_now = float(np.min(ranges)) if len(ranges) else self.cfg.sonar.max_range
