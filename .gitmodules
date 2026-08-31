@@ -1,0 +1,3 @@
+[submodule "native/fs2d/vendor/fourier-soft-2d"]
+	path = native/fs2d/vendor/fourier-soft-2d
+	url = https://github.com/constructor-robotics/fourier-soft-2d.git
