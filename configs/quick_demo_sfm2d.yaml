@@ -93,7 +93,7 @@ env:
   process_noise_theta_deg: 1.0
   change_threshold: 1.5
   map_completeness_threshold: 0.6
-  force_numpy_fs2d: true
+  force_numpy_fs2d: false  # native lib preferred when built; falls back to numpy automatically if not
   use_sfm_fusion: true
   use_sfm2d: true
   sfm2d_apply_correction_from: "both"

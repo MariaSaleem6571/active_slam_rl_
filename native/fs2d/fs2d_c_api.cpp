@@ -48,20 +48,32 @@
 // as FourierMellinRegistration's model in fs2d.py), not a real
 // uncertainty estimate from the algorithm.
 //
-// STATUS: WRITTEN BUT NOT COMPILE-TESTED HERE
+// STATUS: BUILT, RUN, AND VERIFIED (see native/fs2d/README.md for the
+// numbers)
 // --------------------------------------------------------------
-// This was written by careful, literal reading of
-// softDescriptorRegistration.h/.cpp and registrationOfTwoImageScans.cpp,
-// not verified by an actual build in this environment -- compiling it
-// needs OpenCV + PCL + FFTW3 + OpenMP (+ CGAL, which
-// softDescriptorRegistration.h includes unconditionally even though the
-// vendored CMakeLists.txt's find_package() calls don't mention it) dev
-// packages, whose combined dependency closure (~478 packages on Ubuntu,
-// including VTK9 and a full Qt5/JDK toolchain pulled in transitively by
-// libpcl-dev) is far more than fits in the sandbox this was written in.
-// Build this on your own machine or via native/fs2d/README.md's Docker
-// path and report back the first compile error if any -- there will
-// likely be at least one signature mismatch to fix.
+// This compiled and linked cleanly on the first attempt (OpenCV, PCL
+// common+io, FFTW3, OpenMP, CGAL, Eigen3 dev packages -- see
+// native/fs2d/README.md for the install command and why it needs more
+// than the vendored submodule's own CMakeLists.txt asks for). Verified
+// against real generated sonar frames from this project's own
+// TunnelWorld/SonarModel, not just synthetic test images: recovers pure
+// translation exactly, pure rotation to within a couple of degrees, and
+// on 100 trials of real imaging-sonar frame pairs at random rotations,
+// median rotation error ~5 degrees with a ~5% gross-error (>90 degree)
+// rate -- notably better than this project's own numpy Fourier-Mellin
+// backend's ~19 degree median / ~9% gross-error rate on the identical
+// test (see registration/fs2d.py's fold-ambiguity docstring for that
+// backend's numbers). Also confirmed working through the real training
+// entrypoint (scripts/run_training.py), not just direct unit-level
+// calls.
+//
+// One real bug was found and fixed in getting there: constructing a
+// fresh softDescriptorRegistration per call leaked several MB per call
+// (its destructor doesn't appear to release everything its constructor
+// allocates for the SOFT-transform lookup tables) -- see
+// get_cached_registration()'s comment below for the fix (cache and
+// reuse one instance instead of reconstructing it every call, which
+// also removed most of the per-call latency as a side effect).
 
 #include "fs2d_c_api.h"
 
@@ -77,6 +89,32 @@
 #include "softDescriptorRegistration.h"
 
 namespace {
+
+// softDescriptorRegistration's constructor precomputes sizeable SOFT-
+// transform lookup tables (visible as its own "Generating
+// seminaive_naive tables..." stderr message) -- expensive, and, in
+// testing, its destructor does not appear to release everything the
+// constructor allocates: constructing-and-destructing one per call to
+// fs2d_register() leaked several MB per call, growing without bound
+// across a real training run's worth of registrations (confirmed by
+// watching RSS climb monotonically over dozens of calls in a tight
+// loop). Rather than try to patch the vendored library's own
+// destructor, this keeps a single lazily-constructed instance alive for
+// the lifetime of the process and reuses it across calls -- since this
+// project only ever uses one fixed N (SonarConfig.frame_size, 64 by
+// default), this also removes the repeated table-regeneration overhead
+// entirely after the first call, which was the dominant cost in initial
+// timing (~16ms/call warm, mostly table regeneration).
+softDescriptorRegistration& get_cached_registration(int N) {
+    static int cachedN = -1;
+    static softDescriptorRegistration* cached = nullptr;
+    if (cached == nullptr || cachedN != N) {
+        delete cached;
+        cached = new softDescriptorRegistration(N, N / 2, N / 2, N / 2 - 1);
+        cachedN = N;
+    }
+    return *cached;
+}
 
 // Mirrors registrationOfTwoVoxelsSOFTFast's per-candidate-angle body
 // (softDescriptorRegistration.cpp, roughly lines 628-665) with the CSV
@@ -170,7 +208,7 @@ extern "C" void fs2d_register(
     std::vector<double> scanPrev(scan_prev, scan_prev + N * N);
     std::vector<double> scanCurr(scan_curr, scan_curr + N * N);
 
-    softDescriptorRegistration reg(N, N / 2, N / 2, N / 2 - 1);
+    softDescriptorRegistration& reg = get_cached_registration(N);
 
     // Candidate rotation angles (this is where the fold-ambiguity-style
     // multi-candidate handling lives in the real algorithm -- see

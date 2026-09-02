@@ -76,7 +76,19 @@ class EnvConfig:
     process_noise_theta_deg: float = 1.0
     change_threshold: float = 1.5
     map_completeness_threshold: float = 0.6
-    force_numpy_fs2d: bool = True       # native lib usually isn't linked yet
+    force_numpy_fs2d: bool = False      # prefer native/fs2d/build/libfs2d.so
+                                          # when present (see FS2DRegistration
+                                          # -- it falls back to the numpy
+                                          # Fourier-Mellin implementation
+                                          # automatically if the native lib
+                                          # isn't built, so this is safe as a
+                                          # default either way). Verified the
+                                          # native backend is *more* accurate
+                                          # than the numpy one on this env's
+                                          # actual sonar frames (~5% gross-
+                                          # error rate vs. ~9%, see
+                                          # native/fs2d/README.md) before
+                                          # flipping this default.
     # Fuse FS2D with IMU/DVL dead-reckoning via fusion.sfm.StateFusionModule
     # (see docs/ARCHITECTURE.md section 9) instead of integrating FS2D's
     # output alone. Set False to reproduce this codebase's pre-SfM behavior
