@@ -20,25 +20,47 @@ The upstream algorithm is vendored as a submodule at
 `native/fs2d/vendor/fourier-soft-2d` (upstream:
 https://github.com/constructor-robotics/fourier-soft-2d — Bülow & Birk,
 IJCV 2018; Hansen & Birk, ICRA 2023). `fs2d_c_api.cpp` bridges it to the
-plain C ABI below — it's a real, non-stub implementation (not the old
-"drop in your code" template), calling directly into
-`softDescriptorRegistration`'s public registration methods (see the
-detailed rationale in `fs2d_c_api.cpp`'s own header comment: why it
-inlines the same computation `registrationOfTwoVoxelsSOFTFast` does
-rather than calling that function directly, and why the quality/
-covariance outputs are a documented heuristic rather than something
-upstream provides).
+plain C ABI below, calling directly into `softDescriptorRegistration`'s
+public registration methods (see the detailed rationale in
+`fs2d_c_api.cpp`'s own header comment: why it inlines the same
+computation `registrationOfTwoVoxelsSOFTFast` does rather than calling
+that function directly, and why the quality/covariance outputs are a
+documented heuristic rather than something upstream provides).
 
-**This has been written by careful reading of upstream's source, not
-verified by an actual successful build.** Compiling it needs OpenCV, PCL,
-FFTW3, OpenMP, and CGAL dev packages — that combined dependency closure
-(~478 packages on Ubuntu 24.04, including VTK9 and a transitively-pulled
-Qt5/JDK toolchain via `libpcl-dev`) is far more than fit in the sandbox
-this was developed in. **Build it on your own machine or in Docker and
-report back the first compile error, if any** — there's a reasonable
-chance of at least one signature mismatch to fix on the first attempt at
-something this size, and that's genuinely faster to fix with a real
-compiler error in hand than to keep reasoning about blind.
+**This has been built and verified, not just written.** Compiled cleanly
+on the first attempt (OpenCV, PCL common+io, FFTW3, OpenMP, CGAL, Eigen3
+dev packages). Checked against:
+
+- Synthetic test images: exact translation recovery, rotation recovery
+  to within a couple of degrees.
+- 100 trials of **real** generated imaging-sonar frames (this project's
+  own `TunnelWorld`/`SonarModel`) at random rotations: median error ~5
+  degrees, ~5% gross-error (>90 degree) rate — notably better than this
+  project's own numpy `FourierMellinRegistration` backend's ~19 degree
+  median / ~9% gross-error rate on the identical test (see
+  `registration/fs2d.py`'s fold-ambiguity docstring for that backend's
+  numbers).
+- The real training entrypoint end-to-end (`scripts/run_training.py`,
+  not just direct calls): 2048 real timesteps at 67 fps with the native
+  backend active, no crashes, normal CSV logging.
+- All of `tests/test_registration.py`, including the native-vs-numpy
+  comparison test, which now actually runs (was skip-only before this
+  was built).
+
+**One real bug found and fixed along the way:** constructing a fresh
+`softDescriptorRegistration` per call leaked several MB per call (its
+destructor doesn't release everything its constructor allocates for the
+SOFT-transform lookup tables) — confirmed by watching memory climb
+unboundedly across repeated calls, and this is what caused an
+out-of-memory crash partway through a full test suite run before the
+fix. `fs2d_c_api.cpp` now caches and reuses a single instance across
+calls instead (see `get_cached_registration()`), which fixed the leak
+and, as a bonus, dropped per-call latency from ~16.5ms to ~9.75ms once
+warm (no more repeated table regeneration).
+
+Because of this verified accuracy improvement, `EnvConfig.force_numpy_fs2d`
+now defaults to `false` (native preferred when built, automatic fallback
+to numpy if not) — see that field's comment in `env/sim_env.py`.
 
 After cloning or pulling this repo, fetch the submodule's files first:
 ```bash
@@ -47,28 +69,19 @@ git submodule update --init --recursive
 
 ## Build steps
 
-**Recommended: Docker.** The submodule's own `Dockerfile` (at
-`native/fs2d/vendor/fourier-soft-2d/Dockerfile`) already assembles the
-exact OpenCV/PCL/FFTW3/CGAL/Boost stack this needs — it's a known-working
-environment, whereas hand-installing ~478 apt packages on a bare host is
-slower and more likely to hit a missing/mismatched package. Two ways to
-use it:
-
-- Add this project's `Dockerfile`/`docker-compose.yml` as a build stage
-  that also runs `cmake`/`cmake --build` in `native/fs2d/`, using the
-  submodule's `Dockerfile` as a reference for which packages to install
-  (not attempted here — this project's own Docker setup wasn't written
-  with native C++ deps in mind, extending it is its own task).
-- Or, simplest to try first: build inside a container started from the
-  submodule's own image, with this whole repo bind-mounted in, and just
-  run the `cmake`/`cmake --build` commands below inside it.
-
-**Without Docker**, if your machine already has (or can install) these:
+**Ubuntu/Debian**, this is what was actually used and verified:
 ```bash
-# Ubuntu/Debian
-sudo apt-get install cmake libopencv-dev libpcl-dev libfftw3-dev \
-    libomp-dev libcgal-dev libeigen3-dev
+sudo apt-get install --no-install-recommends cmake libopencv-dev \
+    libpcl-dev libfftw3-dev libomp-dev libcgal-dev libeigen3-dev
 ```
+Fair warning: this pulls in a large transitive dependency closure via
+`libpcl-dev` (VTK9, and a Qt5/JDK toolchain that isn't optional even
+with `--no-install-recommends` on Ubuntu 24.04's packaging) — expect on
+the order of a few GB of disk space and several hundred packages.
+**Docker is the better default** if you'd rather not do that on your
+main machine: the submodule's own `Dockerfile` (at
+`native/fs2d/vendor/fourier-soft-2d/Dockerfile`) already has this exact
+stack assembled and known-working.
 
 Then, either way:
 ```bash
@@ -78,7 +91,7 @@ cmake ..
 cmake --build . --config Release
 ```
 
-This should produce `libfs2d.so` (or the platform equivalent) in
+This produces `libfs2d.so` (or the platform equivalent) in
 `native/fs2d/build/`. Nothing on the Python side needs to change — the next
 time you construct `FS2DRegistration()`, `.backend` will report `"native"`
 instead of `"fourier_mellin_numpy"`, and every downstream module (mapping,
