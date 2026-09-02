@@ -394,3 +394,46 @@ def plot_baseline_comparison(summaries: dict, out_dir: str) -> str:
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
     return out_path
+
+
+def plot_ablation_comparison(table: dict, out_dir: str, reference: str = None) -> str:
+    """Standard ablation-table bar chart: one group of bars per headline
+    metric, one bar per ablation variant within each group -- see
+    scripts/run_ablations.py, which produces `table` (ablation name ->
+    metric -> (mean, std) across seeds) and calls this to render it.
+
+    `reference` names the "everything on" variant (e.g. "full") to
+    highlight with a distinct color and a dashed reference line per
+    panel, matching how ablation tables in this area are usually read:
+    everything else is a delta *from* the full model, not an independent
+    comparison among equals.
+    """
+    metrics_to_plot = [
+        ("completeness", "Map completeness (%)", False),
+        ("ate_mean", "Mean ATE (m, lower better)", True),
+        ("total_reward", "Episode reward", False),
+        ("collision_count", "Collisions (lower better)", True),
+        ("loop_closures_validated", "Validated loop closures", False),
+    ]
+    names = list(table.keys())
+    colors = ["tab:blue" if n == reference else "tab:gray" for n in names]
+
+    fig, axes = plt.subplots(1, len(metrics_to_plot), figsize=(4.2 * len(metrics_to_plot), 4.5))
+    if len(metrics_to_plot) == 1:
+        axes = [axes]
+
+    for ax, (key, title, invert) in zip(axes, metrics_to_plot):
+        means = [table[n][key][0] for n in names]
+        stds = [table[n][key][1] for n in names]
+        ax.bar(names, means, yerr=stds, color=colors, capsize=4)
+        if reference is not None and reference in table:
+            ax.axhline(table[reference][key][0], color="tab:blue", linestyle="--", linewidth=1, alpha=0.6)
+        ax.set_title(title)
+        ax.tick_params(axis="x", rotation=35)
+
+    fig.suptitle("Ablation comparison" + (f" (reference: {reference})" if reference else ""))
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, "ablation_comparison.png")
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return out_path

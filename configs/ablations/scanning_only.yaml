@@ -1,7 +1,8 @@
-# Same as quick_demo.yaml but with StructureFromMotion2D (perception/sfm2d.py)
-# turned on, for trying it out quickly. See default.yaml/EnvConfig for the
-# empirical caveats (net-positive on average, not a strict per-episode
-# improvement) before reading too much into a single run of this.
+# ABLATION: same as full.yaml but every step is forced to scanning-mode sensing (EnvConfig.sonar_modality_restriction=scanning_only) -- every step is a full 360-degree sweep, regardless of action (movement/collision physics are unaffected; only which sonar mode fires this step is forced). Isolates the accuracy/battery-cost tradeoff of always using the denser, more reliable modality.
+# Generated from quick_demo.yaml as the common base (see
+# scripts/run_ablations.py) -- every ablation config in this directory
+# starts from the same "everything on" full.yaml and changes exactly one
+# thing, so a comparison table built from them isolates that one factor.
 
 # Small, fast configuration used to produce the demo artifacts checked
 # into results/ (training_curves.png, the eval dashboards, and
@@ -44,6 +45,9 @@ reward_weights:
   w_loop: 5.0
   w_change: 50.0
   w_loiter: 0.15
+  beta_initial: 1.0
+  beta_decay_rate: 0.02
+  beta_min: 0.15
 
 # IMU (gyro) + DVL sensing, and the SfM (State fusion Module) EKF that
 # fuses them with FS2D -- see docs/ARCHITECTURE.md section 9 and
@@ -100,7 +104,7 @@ env:
   sfm2d_correction_gain: 0.5
   # Ablation knobs -- see scripts/run_ablations.py / configs/ablations/.
   use_loop_closure: true
-  sonar_modality_restriction: "both"  # "both" | "imaging_only" | "scanning_only"
+  sonar_modality_restriction: "scanning_only"
 
 training:
   total_timesteps: 18000
@@ -110,5 +114,5 @@ training:
   n_steps: 256
   batch_size: 64
   seed: 0
-  log_dir: results/train_logs
-  model_out: results/ppo_active_slam.zip
+  log_dir: results/ablations/scanning_only/train_logs
+  model_out: results/ablations/scanning_only/ppo_active_slam.zip

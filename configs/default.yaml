@@ -91,6 +91,9 @@ env:
   use_sfm2d: false
   sfm2d_apply_correction_from: "both"   # "imaging" | "scanning" | "both" | "off"
   sfm2d_correction_gain: 0.5
+  # Ablation knobs -- see scripts/run_ablations.py / configs/ablations/.
+  use_loop_closure: true
+  sonar_modality_restriction: "both"  # "both" | "imaging_only" | "scanning_only"
 
 training:
   total_timesteps: 200000

@@ -112,6 +112,13 @@ class EnvConfig:
     use_sfm2d: bool = False
     sfm2d_apply_correction_from: str = "both"
     sfm2d_correction_gain: float = 0.5   # how strongly (0-1) to apply a computed correction, mirrors loop closure's `pull`
+
+    # Ablation knobs -- standard axes for an active-SLAM ablation table
+    # (see scripts/run_ablations.py / configs/ablations/): whether loop
+    # closure runs at all, and whether the vehicle is restricted to a
+    # single sonar modality regardless of which action it takes.
+    use_loop_closure: bool = True
+    sonar_modality_restriction: str = "both"   # "both" | "imaging_only" | "scanning_only"
     seed: Optional[int] = None
 
 
@@ -176,6 +183,17 @@ class ActiveSlamEnv(gym.Env):
         prev_est = self.est_pose
 
         collided, dwell = self._apply_action(action)
+
+        # Ablation override (see EnvConfig.sonar_modality_restriction):
+        # forces every step's sensing to a single modality regardless of
+        # which action was taken, while leaving movement/collision physics
+        # from _apply_action completely untouched -- this measures "what if
+        # only this sensor existed" without confounding it with a different
+        # action space or movement policy.
+        if self.cfg.sonar_modality_restriction == "imaging_only":
+            dwell = False
+        elif self.cfg.sonar_modality_restriction == "scanning_only":
+            dwell = True
 
         # --- Sense ---
         y, x, theta = self.true_pose
@@ -296,7 +314,15 @@ class ActiveSlamEnv(gym.Env):
         ell_t, candidate = self.loop_detector.query(frame, self.t, mode=frame_mode)
         loop_closure_validated = False
         info_gain = 0.0
-        if candidate is not None:
+        # Ablation gate (EnvConfig.use_loop_closure): when disabled, still
+        # runs the query above so ell_t reflects "would a candidate exist"
+        # for diagnostic purposes, but never actually validates a closure
+        # or applies its pose correction -- isolates loop closure's
+        # contribution to drift/reward without touching anything else
+        # (keyframes still accumulate too, in case a later step flips this
+        # back on mid-episode during manual experimentation; it's the
+        # *use* of a closure that's gated, not the bookkeeping).
+        if candidate is not None and self.cfg.use_loop_closure:
             kf_scan = self.loop_detector.keyframe_scan(candidate.keyframe_idx)
             lc_reg = self.fs2d.register(kf_scan, frame)
             # Two extra gates beyond raw registration quality, both aimed at

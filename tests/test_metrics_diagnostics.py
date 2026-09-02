@@ -102,3 +102,17 @@ class _DummyModel:
     def __init__(self, env):
         self.env = env
         self.num_timesteps = 0
+
+
+def test_plot_ablation_comparison_smoke(tmp_path):
+    from active_slam_rl.metrics.plotting import plot_ablation_comparison
+
+    table = {
+        "full": {"completeness": (85.0, 3.0), "ate_mean": (1.2, 0.2), "total_reward": (150.0, 20.0),
+                 "collision_count": (2.0, 1.0), "loop_closures_validated": (3.0, 1.0)},
+        "no_loop_closure": {"completeness": (80.0, 4.0), "ate_mean": (2.5, 0.5), "total_reward": (90.0, 15.0),
+                             "collision_count": (3.0, 1.5), "loop_closures_validated": (0.0, 0.0)},
+    }
+    out_path = plot_ablation_comparison(table, str(tmp_path), reference="full")
+    assert os.path.exists(out_path)
+    assert os.path.getsize(out_path) > 0

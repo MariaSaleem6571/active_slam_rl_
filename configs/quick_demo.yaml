@@ -39,6 +39,9 @@ reward_weights:
   w_loop: 5.0
   w_change: 50.0
   w_loiter: 0.15
+  beta_initial: 1.0
+  beta_decay_rate: 0.02
+  beta_min: 0.15
 
 # IMU (gyro) + DVL sensing, and the SfM (State fusion Module) EKF that
 # fuses them with FS2D -- see docs/ARCHITECTURE.md section 9 and
@@ -93,6 +96,9 @@ env:
   use_sfm2d: false
   sfm2d_apply_correction_from: "both"
   sfm2d_correction_gain: 0.5
+  # Ablation knobs -- see scripts/run_ablations.py / configs/ablations/.
+  use_loop_closure: true
+  sonar_modality_restriction: "both"  # "both" | "imaging_only" | "scanning_only"
 
 training:
   total_timesteps: 18000

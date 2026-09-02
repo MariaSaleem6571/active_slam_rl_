@@ -93,3 +93,46 @@ def test_scalars_include_frame_mode_flag():
 
     obs, *_ = env.step(0)  # forward -> imaging again
     assert obs["scalars"][5] == 0.0
+
+
+def test_sonar_modality_restriction_forces_frame_mode():
+    """EnvConfig.sonar_modality_restriction (see scripts/run_ablations.py
+    for how this is used) must force every step's frame_mode regardless
+    of the action taken, without breaking normal movement/collision
+    physics from _apply_action."""
+    cfg_imaging = EnvConfig(world=WorldConfig(height=80, width=80, n_steps=250, seed=0),
+                             max_steps=40, seed=0, sonar_modality_restriction="imaging_only")
+    env = ActiveSlamEnv(cfg_imaging)
+    env.reset(seed=0)
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        _, _, _, _, info = env.step(int(rng.integers(0, env.action_space.n)))
+        assert info["frame_mode"] == "imaging"
+
+    cfg_scanning = EnvConfig(world=WorldConfig(height=80, width=80, n_steps=250, seed=0),
+                              max_steps=40, seed=0, sonar_modality_restriction="scanning_only")
+    env = ActiveSlamEnv(cfg_scanning)
+    env.reset(seed=0)
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        _, _, _, _, info = env.step(int(rng.integers(0, env.action_space.n)))
+        assert info["frame_mode"] == "scanning"
+
+
+def test_use_loop_closure_false_never_validates_a_closure():
+    """EnvConfig.use_loop_closure=False must gate closure *validation* and
+    its pose correction -- used by scripts/run_ablations.py's
+    'no_loop_closure' variant to isolate loop closure's contribution."""
+    cfg = EnvConfig(world=WorldConfig(height=80, width=80, n_steps=250, seed=0),
+                     max_steps=150, seed=0, use_loop_closure=False)
+    env = ActiveSlamEnv(cfg)
+    env.reset(seed=0)
+    rng = np.random.default_rng(0)
+    any_validated = False
+    for _ in range(150):
+        _, _, term, trunc, info = env.step(int(rng.integers(0, env.action_space.n)))
+        if info["loop_closure_validated"]:
+            any_validated = True
+        if term or trunc:
+            break
+    assert not any_validated
