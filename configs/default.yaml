@@ -24,7 +24,8 @@ sonar:
 reward_weights:
   w_cov: 400.0
   w_cons: 2.0
-  w_safe: 4.0
+  w_safe: 8.0
+  w_collision: 30.0  # separate, discrete penalty for an actual collision -- see reward.py
   w_loop: 5.0
   w_change: 50.0
 

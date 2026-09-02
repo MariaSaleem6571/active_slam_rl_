@@ -2,12 +2,15 @@
 Multi-objective reward (thesis section 5.7):
 
     r_t = w_cov * Delta V_t^unc + w_cons * Delta I_t
-          - w_safe * c_prox,t + w_loop * b_lc,t
+          - w_safe * c_prox,t - w_collision * 1[collision_t] + w_loop * b_lc,t
 
   * Delta V_t^unc : reduction in map entropy this step (uncertainty resolved)
   * Delta I_t     : information gain from a validated loop closure this step
                     (reduction in accumulated pose-covariance trace)
-  * c_prox,t      : proximity-to-obstacle penalty (collision risk)
+  * c_prox,t      : proximity-to-obstacle penalty (continuous, collision risk)
+  * 1[collision_t]: discrete penalty for an *actual* collision this step,
+                    separate from the continuous proximity term -- see
+                    RewardWeights.w_collision's comment for why this exists.
   * b_lc,t        : flat bonus on a validated loop closure
 
 Change-detection reward shaping (feedback loop D) is folded in as an extra
@@ -40,7 +43,22 @@ from dataclasses import dataclass
 class RewardWeights:
     w_cov: float = 400.0    # entropy_delta is a small per-voxel quantity; scaled up to be comparable to other terms
     w_cons: float = 2.0
-    w_safe: float = 4.0
+    w_safe: float = 8.0     # continuous near-obstacle cost (see sim_env.py's proximity_cost) -- was 4.0
+    # A separate, discrete penalty specifically for an *actual* collision
+    # this step (env/sim_env.py's `collided` flag), on top of w_safe's
+    # continuous proximity cost above. Added because proximity_cost is
+    # capped at exactly 1.0 on collision -- the same value it already
+    # reaches from merely being very close to a wall (e.g. min_obstacle_dist
+    # ~0.1 already gives proximity_cost ~0.97) -- so an actual collision
+    # was barely distinguishable from a near-miss, and the combined -4.0
+    # max (old w_safe=4.0) was negligible next to w_cov=400: in practice
+    # this meant colliding was close to free, and empirically produced
+    # collision counts (up to ~240/episode) that never improved over a
+    # full 200k-timestep training run. w_collision=30.0 puts a real
+    # collision in the same order of magnitude as w_change=50, enough to
+    # meaningfully outweigh nearby exploration reward rather than being
+    # rounding-error noise next to it.
+    w_collision: float = 30.0
     w_loop: float = 5.0
     w_change: float = 50.0  # feedback loop D: reward for resolving change-flagged voxels
     w_loiter: float = 0.15  # penalty per consecutive near-stationary step (anti reward-hacking)
@@ -54,6 +72,7 @@ class RewardBreakdown:
     coverage_term: float
     consistency_term: float
     safety_term: float
+    collision_term: float
     loop_bonus_term: float
     change_term: float
     loiter_term: float
@@ -94,6 +113,7 @@ def compute_beta(steps_since_last_closure: int, local_unknown_fraction: float = 
 
 def compute_reward(entropy_delta: float, info_gain: float, proximity_cost: float,
                     loop_closure_validated: bool, change_voxels_resolved: float,
+                    collided: bool = False,
                     stationary_streak: int = 0, beta: float = 1.0,
                     weights: RewardWeights = RewardWeights()) -> RewardBreakdown:
     # beta high (just closed a loop) -> full exploration credit.
@@ -103,6 +123,10 @@ def compute_reward(entropy_delta: float, info_gain: float, proximity_cost: float
     coverage_term = weights.w_cov * entropy_delta * beta
     consistency_term = weights.w_cons * info_gain
     safety_term = -weights.w_safe * proximity_cost
+    # Discrete, on top of safety_term -- see RewardWeights.w_collision's
+    # comment for why the continuous proximity cost alone wasn't enough
+    # of a deterrent.
+    collision_term = -weights.w_collision * (1.0 if collided else 0.0)
     loop_bonus_term = weights.w_loop * (1.0 if loop_closure_validated else 0.0)
     urgency = 1.0 - beta
     change_term = weights.w_change * change_voxels_resolved * (1.0 + urgency)
@@ -113,12 +137,13 @@ def compute_reward(entropy_delta: float, info_gain: float, proximity_cost: float
     # gating in sim_env.py.
     loiter_term = -weights.w_loiter * max(0, stationary_streak - 3)
 
-    total = (coverage_term + consistency_term + safety_term + loop_bonus_term
-             + change_term + loiter_term)
+    total = (coverage_term + consistency_term + safety_term + collision_term
+             + loop_bonus_term + change_term + loiter_term)
     return RewardBreakdown(
         coverage_term=coverage_term,
         consistency_term=consistency_term,
         safety_term=safety_term,
+        collision_term=collision_term,
         loop_bonus_term=loop_bonus_term,
         change_term=change_term,
         loiter_term=loiter_term,

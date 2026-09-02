@@ -180,3 +180,36 @@ def test_env_decay_controller_persists_across_episode_resets():
         "the adaptive controller must persist across episodes -- it accumulates "
         "a running statistic across resets, not per-episode"
     )
+
+
+def test_collision_term_makes_actual_collision_meaningfully_worse_than_near_miss():
+    """Regression test for the collision-penalty fix: an actual collision
+    must cost noticeably more than a near-miss at maximal proximity_cost,
+    not the ~0.1-reward-unit difference the old (w_safe-only, no
+    collision_term) formula produced -- that gap was small enough next to
+    w_cov=400 to make colliding functionally free, and empirically
+    produced collision counts that never improved over a full training
+    run. See RewardWeights.w_collision's comment for the full story."""
+    w = RewardWeights()
+    near_miss = compute_reward(entropy_delta=0.01, info_gain=0.0, proximity_cost=0.97,
+                                loop_closure_validated=False, change_voxels_resolved=0.0,
+                                collided=False, weights=w)
+    actual_collision = compute_reward(entropy_delta=0.01, info_gain=0.0, proximity_cost=1.0,
+                                       loop_closure_validated=False, change_voxels_resolved=0.0,
+                                       collided=True, weights=w)
+    gap = near_miss.total - actual_collision.total
+    assert gap > 20.0, (
+        f"collision penalty regressed: an actual collision is only {gap:.2f} reward "
+        f"units worse than an otherwise-identical near-miss (expected > 20)"
+    )
+    assert actual_collision.collision_term < 0
+
+
+def test_collided_defaults_to_false_for_backward_compatibility():
+    """compute_reward's collided parameter must default to False so every
+    pre-existing call site/test (which never passed it) keeps behaving
+    exactly as before."""
+    w = RewardWeights()
+    r = compute_reward(entropy_delta=0.0, info_gain=0.0, proximity_cost=0.0,
+                        loop_closure_validated=False, change_voxels_resolved=0.0, weights=w)
+    assert r.collision_term == 0.0

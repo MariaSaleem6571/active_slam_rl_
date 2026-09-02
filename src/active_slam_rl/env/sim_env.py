@@ -379,6 +379,7 @@ class ActiveSlamEnv(gym.Env):
             proximity_cost=proximity_cost,
             loop_closure_validated=loop_closure_validated,
             change_voxels_resolved=change_voxels_resolved / (self.map.height * self.map.width),
+            collided=collided,
             stationary_streak=self._stationary_streak,
             beta=beta,
             weights=self.cfg.reward_weights,
