@@ -39,6 +39,7 @@ from typing import Optional
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
+from scipy.ndimage import rotate
 
 from active_slam_rl.env.world_generator import TunnelWorld, WorldConfig
 from active_slam_rl.env.sonar_model import SonarModel, SonarConfig
@@ -119,6 +120,10 @@ class EnvConfig:
     # single sonar modality regardless of which action it takes.
     use_loop_closure: bool = True
     sonar_modality_restriction: str = "both"   # "both" | "imaging_only" | "scanning_only"
+    # Truncates the episode after this many *consecutive* collisions (see
+    # the collision-streak comment in step()) -- gives repeated collision
+    # a real opportunity cost beyond the per-step reward penalty.
+    max_collision_streak: int = 15
     seed: Optional[int] = None
 
 
@@ -135,7 +140,7 @@ class ActiveSlamEnv(gym.Env):
         ps = config.patch_size
         self.observation_space = spaces.Dict({
             "patch": spaces.Box(low=0.0, high=1.0, shape=(3, ps, ps), dtype=np.float32),
-            "scalars": spaces.Box(low=-10.0, high=10.0, shape=(6,), dtype=np.float32),
+            "scalars": spaces.Box(low=-10.0, high=10.0, shape=(8,), dtype=np.float32),
         })
 
         self.fs2d = FS2DRegistration(force_numpy=config.force_numpy_fs2d)
@@ -295,9 +300,25 @@ class ActiveSlamEnv(gym.Env):
         variance = self.map.uncertainty()
         change_mask = compute_change_mask(prob_curr, prob_prev, variance,
                                            threshold=self.cfg.change_threshold)
-        entropy_after = self.map.entropy_normalized()
-        entropy_delta = self._prev_entropy - entropy_after   # positive = uncertainty resolved
-        self._prev_entropy = entropy_after
+        # Local (not whole-map) entropy delta: mean per-cell entropy
+        # resolved within a window around the vehicle's *current*
+        # position, wide enough to cover everything the sonar could
+        # plausibly have touched this step (sonar.max_range + margin).
+        # This used to be self._prev_entropy - self.map.entropy_normalized()
+        # -- the change in mean entropy over the *entire* map. That's
+        # grid-size-invariant (deliberately, so reward scale doesn't
+        # depend on which world config you're using -- see
+        # entropy_normalized()'s docstring), but it dilutes any single
+        # step's real local contribution by the total number of cells in
+        # the whole map, most of which this step had nothing to do with.
+        # A local window keeps the "don't scale with world size" property
+        # while making the causal link the policy needs to learn --
+        # "moving here revealed genuinely new area" -- much less diluted
+        # by cells the current action couldn't possibly have affected.
+        local_radius = int(np.ceil(self.cfg.sonar.max_range)) + 2
+        entropy_before_local = self._local_entropy_normalized(prob_prev, est_y, est_x, local_radius)
+        entropy_after_local = self._local_entropy_normalized(prob_curr, est_y, est_x, local_radius)
+        entropy_delta = entropy_before_local - entropy_after_local   # positive = uncertainty resolved
 
         # --- Loop closure / place recognition ---
         # Captured *before* a closure this step can reset the clock below,
@@ -312,6 +333,7 @@ class ActiveSlamEnv(gym.Env):
         self.loop_detector.maybe_add_keyframe((est_y, est_x, est_theta), frame, self.t,
                                                mode=frame_mode)
         ell_t, candidate = self.loop_detector.query(frame, self.t, mode=frame_mode)
+        self._last_candidate = candidate   # see _best_known_loop_candidate_pose (action 6)
         loop_closure_validated = False
         info_gain = 0.0
         # Ablation gate (EnvConfig.use_loop_closure): when disabled, still
@@ -373,6 +395,19 @@ class ActiveSlamEnv(gym.Env):
         else:
             self._stationary_streak = 0
 
+        # Repeatedly colliding costs reward (see RewardWeights.w_collision)
+        # but never used to end the episode -- a policy could spend its
+        # entire remaining episode ramming the same wall for a small,
+        # bounded per-step cost rather than a real consequence. Cutting
+        # the episode short after a run of consecutive collisions gives
+        # that behavior an actual opportunity cost (lost future reward),
+        # on top of the per-step penalty, mirroring how _stationary_streak
+        # already does the same for the separate loitering failure mode.
+        if collided:
+            self._collision_streak += 1
+        else:
+            self._collision_streak = 0
+
         reward_breakdown = compute_reward(
             entropy_delta=entropy_delta,
             info_gain=info_gain,
@@ -393,7 +428,8 @@ class ActiveSlamEnv(gym.Env):
         self._last_loop_closure = loop_closure_validated
 
         terminated = False
-        truncated = self.t >= self.cfg.max_steps or self.battery <= 0
+        truncated = (self.t >= self.cfg.max_steps or self.battery <= 0
+                     or self._collision_streak >= self.cfg.max_collision_streak)
 
         obs = self._build_observation()
         info = self._build_info(reward_breakdown)
@@ -425,6 +461,7 @@ class ActiveSlamEnv(gym.Env):
         self.map = OccupancyGrid(self.world.occ.shape[0], self.world.occ.shape[1])
         self.sonar = SonarModel(self.world, cfg.sonar, rng=self.rng)
         self.loop_detector = LoopClosureDetector()
+        self._last_candidate = None   # see _best_known_loop_candidate_pose (action 6)
         # Rebuilt fresh every episode against the *current* self.rng, same
         # reasoning as self.sonar above (see the long comment in __init__):
         # a fresh simulated gyro/DVL unit for a fresh deployment, and a
@@ -454,7 +491,6 @@ class ActiveSlamEnv(gym.Env):
         self.trace_cov = 0.1
         self._prev_frame = None
         self._prev_frame_mode = None
-        self._prev_entropy = self.map.entropy_normalized()
         self._q_t = 0.0
         self._ell_t = 0.0
         self._last_reg = None
@@ -467,6 +503,7 @@ class ActiveSlamEnv(gym.Env):
         self._loop_closure_cooldown = 12   # steps
         self._last_validated_closure_step = -10_000
         self._stationary_streak = 0
+        self._collision_streak = 0
 
         self._ate_accumulator = []
         self._path_length = 0.0
@@ -516,9 +553,28 @@ class ActiveSlamEnv(gym.Env):
         return collided, dwell
 
     def _best_known_loop_candidate_pose(self):
+        """Action 6's target: revisit a keyframe worth re-confirming.
+
+        BUG FIXED HERE: this used to unconditionally return
+        `self.loop_detector.keyframe_pose(len(keyframes) // 2)` -- the
+        middle keyframe by list index, regardless of anything the loop
+        detector actually found. Despite the method's name, it never
+        looked at the *actual* current candidate (`self._last_candidate`,
+        set every step from `self.loop_detector.query()`'s own result) --
+        so action 6 was sending the vehicle toward an arbitrary,
+        potentially stale or irrelevant point in the map, which is a
+        plausible contributor to unnecessary collisions/wasted movement
+        whenever that arbitrary index happened to be inconvenient. Now
+        actually uses the most recent real candidate when one exists,
+        matching the method's name; the middle-keyframe pick remains only
+        as a fallback for when no live candidate exists yet (nothing
+        better to go on), preserving the original edge-case handling.
+        """
+        if self._last_candidate is not None:
+            return self.loop_detector.keyframe_pose(self._last_candidate.keyframe_idx)
         if not self.loop_detector.keyframes:
             return None
-        idx = len(self.loop_detector.keyframes) // 2  # revisit an established, not-most-recent, keyframe
+        idx = len(self.loop_detector.keyframes) // 2  # fallback: no live candidate yet, revisit an established keyframe
         return self.loop_detector.keyframe_pose(idx)
 
     def _integrate_odometry_from_delta(self, delta):
@@ -568,6 +624,25 @@ class ActiveSlamEnv(gym.Env):
                 hit_cell = (int(round(y + r * dyv)), int(round(x + r * dxv)))
             self.map.update_beam((int(round(y)), int(round(x))), free_cells, hit_cell)
 
+    def _local_entropy_normalized(self, arr, y, x, radius) -> float:
+        """Mean per-cell entropy within a square window of half-width
+        `radius` centered at (y, x) -- the local counterpart to
+        OccupancyGrid.entropy_normalized()'s whole-map mean, used by the
+        reward's entropy_delta (see step()'s comment for why local rather
+        than global). Cells outside the map bounds are excluded from the
+        mean entirely (not treated as zero-entropy padding, which would
+        artificially bias the result toward looking more "resolved" than
+        it is whenever the window extends past an edge)."""
+        h, w = self.map.height, self.map.width
+        cy, cx = int(round(y)), int(round(x))
+        y0, y1 = max(0, cy - radius), min(h, cy + radius)
+        x0, x1 = max(0, cx - radius), min(w, cx + radius)
+        if y1 <= y0 or x1 <= x0:
+            return 0.0
+        p = np.clip(arr[y0:y1, x0:x1], 1e-6, 1 - 1e-6)
+        ent = -(p * np.log(p) + (1 - p) * np.log(1 - p))
+        return float(ent.mean())
+
     def _crop_patch(self, y, x):
         ps = self.cfg.patch_size
         half = ps // 2
@@ -615,11 +690,45 @@ class ActiveSlamEnv(gym.Env):
         return float(unknown.mean())
 
     def _build_observation(self):
-        y, x, _ = self.est_pose
+        y, x, theta = self.est_pose
         crop = self._crop_patch(y, x)
         belief_patch = crop(self.map.prob)
         uncertainty_patch = crop(self.map.uncertainty())
         change_patch = crop(self._last_change_mask.astype(np.float32))
+
+        # Rotate each patch so "forward" (the vehicle's current heading)
+        # always points the same direction in the image (here: to the
+        # right, i.e. +x/+col), regardless of the vehicle's actual
+        # orientation in the world. Without this, the map patch is
+        # world-axis-aligned while every movement action (0/1/2: forward
+        # by a fixed distance, 3/4: turn left/right) is heading-relative
+        # -- the exact same patch content would be observed facing two
+        # opposite directions after a 180-degree turn, but "forward"
+        # means something different each time. That's a real partial-
+        # observability gap: the policy has no way to tell which of
+        # those two situations it's in from the patch alone. Rotating to
+        # an egocentric frame removes the ambiguity, matching how e.g.
+        # Chaplot et al.'s Active Neural SLAM and most active-SLAM/
+        # exploration RL work represent the local map.
+        #
+        # Image-array rows increase downward, but np.sin/np.cos follow
+        # the standard math convention (x=cos, y=sin), so the correct
+        # angle to pass scipy.ndimage.rotate here is +degrees(theta), not
+        # the more instinctively-tempting -degrees(theta) -- verified
+        # empirically (not derived from memory, since row/column vs. x/y
+        # sign conventions are a classic source of an off-by-a-flip bug):
+        # scipy's rotate(angle) maps an array offset (dy, dx) to
+        # (dy*cos(angle) - dx*sin(angle), dy*sin(angle) + dx*cos(angle)).
+        # A feature directly "ahead" of the vehicle sits at offset
+        # (R*sin(theta), R*cos(theta)) -- the same convention
+        # env/sim_env.py's own movement code uses (dy=dist*sin(theta),
+        # dx=dist*cos(theta)) -- and substituting shows angle=+theta is
+        # the one that lands every heading's "straight ahead" at the same
+        # fixed image direction, not -theta.
+        angle_deg = np.degrees(theta)
+        belief_patch = rotate(belief_patch, angle_deg, reshape=False, mode="constant", cval=0.5, order=1)
+        uncertainty_patch = rotate(uncertainty_patch, angle_deg, reshape=False, mode="constant", cval=0.0, order=1)
+        change_patch = rotate(change_patch, angle_deg, reshape=False, mode="constant", cval=0.0, order=1)
         patch = np.stack([belief_patch, uncertainty_patch, change_patch], axis=0).astype(np.float32)
 
         battery_frac = float(np.clip(self.battery / self.cfg.battery_capacity, 0.0, 1.0))
@@ -635,6 +744,10 @@ class ActiveSlamEnv(gym.Env):
         # This also gives the policy the context it needs to learn when
         # dwelling for a scanning-sonar frame is worth the battery cost.
         frame_mode_flag = 1.0 if self._prev_frame_mode == "scanning" else 0.0
+        # sin/cos(theta), not theta itself, so the representation has no
+        # discontinuity at the +-pi wraparound (a raw angle would make
+        # "just past pi" and "just past -pi" look maximally far apart to
+        # the network despite being adjacent headings).
         scalars = np.array([
             self._q_t,
             self._ell_t,
@@ -642,6 +755,8 @@ class ActiveSlamEnv(gym.Env):
             battery_frac,
             time_frac,
             frame_mode_flag,
+            float(np.sin(theta)),
+            float(np.cos(theta)),
         ], dtype=np.float32)
         return {"patch": patch, "scalars": scalars}
 
