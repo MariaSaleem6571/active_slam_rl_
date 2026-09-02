@@ -117,3 +117,41 @@ def test_fold_ambiguity_tiebreak_uses_real_sonar_frames():
         f"of registrations picked the wrong pi-separated candidate "
         f"(expected well under 25% with the overlap-based tie-break)"
     )
+
+
+def test_native_backend_agrees_with_numpy_backend_if_available():
+    """If native/fs2d/build/libfs2d.so has been built (see
+    native/fs2d/README.md), sanity-check it against the pure-Python
+    FourierMellinRegistration backend on the same synthetic pair. Skips
+    entirely if the native library isn't present -- most environments
+    won't have built it (it needs OpenCV/PCL/FFTW3/OpenMP/CGAL; see that
+    README for why that's a heavy, optional build step), so this must not
+    fail the suite for everyone else.
+
+    The two backends use genuinely different algorithms (this project's
+    own Fourier-Mellin/log-polar approach vs. the vendored library's SOFT
+    spherical-harmonic correlation -- see native/fs2d/fs2d_c_api.cpp), so
+    this checks rough agreement on an easy, unambiguous case, not exact
+    equality.
+    """
+    from active_slam_rl.registration.fs2d import FS2DRegistration, NativeFS2DBinding
+
+    native = NativeFS2DBinding()
+    if not native.available:
+        pytest.skip("native/fs2d/build/libfs2d.so not built -- see native/fs2d/README.md")
+
+    combined = FS2DRegistration()
+    assert combined.backend == "native"
+
+    a = _synthetic_frame(seed=1)
+    dy_true, dx_true = 3.0, -2.0
+    b = _translate(a, dy_true, dx_true)
+
+    result_native = combined.register(a, b)
+    result_numpy = FourierMellinRegistration().register(a, b)
+
+    # Loose tolerance -- different algorithms, just checking neither is
+    # wildly wrong relative to the other on an easy, unambiguous case.
+    assert abs(result_native.dy - result_numpy.dy) < 3.0
+    assert abs(result_native.dx - result_numpy.dx) < 3.0
+    assert abs(result_native.dtheta) < np.deg2rad(15)   # no rotation injected

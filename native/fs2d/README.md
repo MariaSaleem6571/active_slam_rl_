@@ -14,42 +14,78 @@ If it is not found, `FS2DRegistration` silently falls back to the pure
 NumPy Fourier-Mellin implementation (`FourierMellinRegistration`) so you can
 develop and train right now without the native code.
 
-## The upstream source is now vendored as a submodule
+## Status
 
-The real algorithm's source is checked out at
+The upstream algorithm is vendored as a submodule at
 `native/fs2d/vendor/fourier-soft-2d` (upstream:
 https://github.com/constructor-robotics/fourier-soft-2d — Bülow & Birk,
-"Scale-Free Registrations in 3D... Fourier-Mellin-SOFT transforms," IJCV
-2018; Hansen & Birk, "Using Registration with Fourier-SOFT in 2D (FS2D)
-for Robust Scan Matching of Sonar Range Data," ICRA 2023).
+IJCV 2018; Hansen & Birk, ICRA 2023). `fs2d_c_api.cpp` bridges it to the
+plain C ABI below — it's a real, non-stub implementation (not the old
+"drop in your code" template), calling directly into
+`softDescriptorRegistration`'s public registration methods (see the
+detailed rationale in `fs2d_c_api.cpp`'s own header comment: why it
+inlines the same computation `registrationOfTwoVoxelsSOFTFast` does
+rather than calling that function directly, and why the quality/
+covariance outputs are a documented heuristic rather than something
+upstream provides).
 
-**After cloning or pulling this repo, fetch the submodule's files:**
+**This has been written by careful reading of upstream's source, not
+verified by an actual successful build.** Compiling it needs OpenCV, PCL,
+FFTW3, OpenMP, and CGAL dev packages — that combined dependency closure
+(~478 packages on Ubuntu 24.04, including VTK9 and a transitively-pulled
+Qt5/JDK toolchain via `libpcl-dev`) is far more than fit in the sandbox
+this was developed in. **Build it on your own machine or in Docker and
+report back the first compile error, if any** — there's a reasonable
+chance of at least one signature mismatch to fix on the first attempt at
+something this size, and that's genuinely faster to fix with a real
+compiler error in hand than to keep reasoning about blind.
+
+After cloning or pulling this repo, fetch the submodule's files first:
 ```bash
 git submodule update --init --recursive
 ```
 
-**What's NOT done yet -- this is real follow-up work, not a detail:**
-upstream ships as a Dockerized FastAPI microservice (build via its own
-`Dockerfile`/`docker-compose.yml`, depends on OpenCV, PCL, FFTW3, CGAL,
-Eigen3, Boost, and its own vendored `soft20` SOFT-transform library) built
-around file-based I/O (read a PNG, write a CSV/PNG), not a linkable
-library exposing the plain C ABI below. The two most likely files to
-wrap are `vendor/fourier-soft-2d/src/registration/src/
-softDescriptorRegistration.cpp` (the `softDescriptorRegistration` class --
-the actual registration algorithm) and `vendor/fourier-soft-2d/src/
-registrationOfTwoImageScans.cpp` (its existing CLI entry point, so its
-exact call pattern is already right there to read). Bridging the two
-means: read `softDescriptorRegistration`'s real method signatures, write
-`fs2d_c_api.cpp` (rename from the `_template` version below) calling into
-it directly from a `double*` buffer instead of loading an image file, and
-get CMake linking against upstream's dependency list. None of that is
-done here -- only the submodule pointer.
+## Build steps
+
+**Recommended: Docker.** The submodule's own `Dockerfile` (at
+`native/fs2d/vendor/fourier-soft-2d/Dockerfile`) already assembles the
+exact OpenCV/PCL/FFTW3/CGAL/Boost stack this needs — it's a known-working
+environment, whereas hand-installing ~478 apt packages on a bare host is
+slower and more likely to hit a missing/mismatched package. Two ways to
+use it:
+
+- Add this project's `Dockerfile`/`docker-compose.yml` as a build stage
+  that also runs `cmake`/`cmake --build` in `native/fs2d/`, using the
+  submodule's `Dockerfile` as a reference for which packages to install
+  (not attempted here — this project's own Docker setup wasn't written
+  with native C++ deps in mind, extending it is its own task).
+- Or, simplest to try first: build inside a container started from the
+  submodule's own image, with this whole repo bind-mounted in, and just
+  run the `cmake`/`cmake --build` commands below inside it.
+
+**Without Docker**, if your machine already has (or can install) these:
+```bash
+# Ubuntu/Debian
+sudo apt-get install cmake libopencv-dev libpcl-dev libfftw3-dev \
+    libomp-dev libcgal-dev libeigen3-dev
+```
+
+Then, either way:
+```bash
+cd native/fs2d
+mkdir -p build && cd build
+cmake ..
+cmake --build . --config Release
+```
+
+This should produce `libfs2d.so` (or the platform equivalent) in
+`native/fs2d/build/`. Nothing on the Python side needs to change — the next
+time you construct `FS2DRegistration()`, `.backend` will report `"native"`
+instead of `"fourier_mellin_numpy"`, and every downstream module (mapping,
+state encoder, reward) keeps working unmodified, since they only depend on
+the `RegistrationResult` dataclass, not on which backend produced it.
 
 ## Required C ABI
-
-Whatever the internal C++ implementation looks like, expose exactly one
-`extern "C"` entry point with this signature (a template is in
-`fs2d_c_api.h` / `fs2d_c_api_template.cpp` in this folder):
 
 ```c
 extern "C" void fs2d_register(
@@ -65,35 +101,12 @@ extern "C" void fs2d_register(
 ```
 
 This is the one function `NativeFS2DBinding` in `fs2d.py` looks up and
-calls — nothing else about your C++ internals needs to be exposed.
-
-## Build steps (once the C API wrapper exists)
-
-1. The FS2D sources are now at `native/fs2d/vendor/fourier-soft-2d`
-   (submodule; run `git submodule update --init --recursive` first if
-   you haven't). This step used to say "drop the sources into
-   `native/fs2d/src/`" -- that's superseded now that they're vendored
-   properly, but writing `fs2d_c_api.cpp` (step 2) is still not done.
-2. Write `fs2d_c_api.cpp` (based on `fs2d_c_api_template.cpp`) so it
-   matches the signature above, calling into
-   `vendor/fourier-soft-2d/src/registration/src/softDescriptorRegistration.cpp`'s
-   actual API -- see this file's "What's NOT done yet" section above for
-   the specific files to start from.
-3. Build:
-
-```bash
-cd native/fs2d
-mkdir -p build && cd build
-cmake ..
-cmake --build . --config Release
-```
-
-This should produce `libfs2d.so` (or the platform equivalent) in
-`native/fs2d/build/`. Nothing on the Python side needs to change — the next
-time you construct `FS2DRegistration()`, `.backend` will report `"native"`
-instead of `"fourier_mellin_numpy"`, and every downstream module (mapping,
-state encoder, reward) keeps working unmodified, since they only depend on
-the `RegistrationResult` dataclass, not on which backend produced it.
+calls — nothing else about the C++ internals needs to be exposed.
+`fs2d_c_api.cpp` currently only handles a square, power-of-two `rows`/
+`cols` (matching `SonarConfig.frame_size=64`'s default, and matching
+upstream's own assumption baked into its SOFT-transform bandwidth
+parameters) — a non-power-of-two size returns a zero-quality result
+rather than mis-registering silently.
 
 ## Sanity-checking the swap
 
@@ -105,3 +118,9 @@ sure the swap didn't silently change behavior:
 ```bash
 pytest tests/test_registration.py -v
 ```
+
+Given the native backend's very different internal algorithm (SOFT
+spherical-harmonic correlation vs. this project's own Fourier-Mellin/
+log-polar approach), don't expect bit-identical output — the test's
+tolerance already accounts for that; if it fails, that's more likely a
+real discrepancy worth looking at than a false alarm.
